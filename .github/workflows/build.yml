@@ -136,10 +136,12 @@ jobs:
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             nfpm_arch: amd64
+            nfpm_asset_arch: x86_64
           - arch: aarch64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             nfpm_arch: arm64
+            nfpm_asset_arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -204,7 +206,7 @@ jobs:
         run: |
           NFPM_VERSION=2.41.0
           curl -fsSL -o /tmp/nfpm.tar.gz \
-            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm_arch }}.tar.gz"
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm_asset_arch }}.tar.gz"
           sudo tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
           nfpm --version
 
