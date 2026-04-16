@@ -73,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/prompts", get(api::list_prompts))
         .route("/prompts/{id}/respond", post(api::respond_prompt))
         .route("/stats", get(api::get_stats))
+        .route("/status", get(api::get_status))
         .route("/mitmproxy", get(api::get_mitmproxy_status))
         .route("/mitmproxy/enable", post(api::enable_mitmproxy))
         .route("/mitmproxy/disable", post(api::disable_mitmproxy))
@@ -188,12 +189,33 @@ async fn static_handler(uri: axum::http::Uri) -> Response {
     (StatusCode::NOT_FOUND, "Not found").into_response()
 }
 
-pub async fn start_server(state: AppState, addr: &str, port: u16) -> Result<(), std::io::Error> {
-    let app = build_router(state);
-    let bind_addr = format!("{addr}:{port}");
-    tracing::info!("Web UI starting at http://{bind_addr}");
+pub async fn start_server(
+    state: AppState,
+    addr: &str,
+    start_port: u16,
+) -> Result<u16, std::io::Error> {
+    let ip: std::net::IpAddr = addr.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("bad bind addr {addr:?}: {e}"),
+        )
+    })?;
 
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let (listener, bound_port) =
+        netguard_core::port_probe::try_bind_from(ip, start_port, 20).await?;
+
+    if bound_port != start_port {
+        tracing::warn!(
+            "configured web port {start_port} on {addr} was busy; bound to {addr}:{bound_port} instead"
+        );
+    } else {
+        tracing::info!("Web UI bound to http://{addr}:{bound_port}");
+    }
+
+    let mut state = state;
+    state.listen_port = bound_port;
+
+    let app = build_router(state);
     // with_connect_info lets handlers extract the caller's SocketAddr via
     // ConnectInfo<SocketAddr> — used for audit-logging security-sensitive
     // endpoints (e.g. the mitmproxy enable/disable toggle).
@@ -202,5 +224,5 @@ pub async fn start_server(state: AppState, addr: &str, port: u16) -> Result<(), 
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
-    Ok(())
+    Ok(bound_port)
 }

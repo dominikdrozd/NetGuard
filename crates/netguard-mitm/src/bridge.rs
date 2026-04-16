@@ -72,7 +72,29 @@ impl MitmBridgeHandle {
 pub async fn spawn_mitm_bridge(
     cfg: MitmBridgeConfig,
     cache: Arc<MitmFlowCache>,
-) -> std::io::Result<MitmBridgeHandle> {
+) -> std::io::Result<(MitmBridgeHandle, u16)> {
+
+    // Find a free port starting at cfg.listen_port. Drop the probe listener
+    // immediately — mitmdump will rebind it moments later. Racy in principle,
+    // but the +20 window + localhost-only binding makes collisions rare.
+    let bound_port = {
+        let ip: std::net::IpAddr = cfg.listen_addr.parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid mitm listen_addr {:?}: {e}", cfg.listen_addr),
+            )
+        })?;
+        let (probe, p) = netguard_core::port_probe::try_bind_from(ip, cfg.listen_port, 20).await?;
+        drop(probe);
+        p
+    };
+    if bound_port != cfg.listen_port {
+        tracing::warn!(
+            "configured mitm port {} was busy; using {} instead",
+            cfg.listen_port,
+            bound_port,
+        );
+    }
 
     // Write the embedded addon script to disk (re-written every start so upgrades pick up changes)
     if let Some(parent) = cfg.addon_path.parent() {
@@ -120,7 +142,7 @@ pub async fn spawn_mitm_bridge(
         .arg("--listen-host")
         .arg(&cfg.listen_addr)
         .arg("--listen-port")
-        .arg(cfg.listen_port.to_string())
+        .arg(bound_port.to_string())
         .arg("-s")
         .arg(&addon_arg)
         .arg("--set")
@@ -158,7 +180,7 @@ pub async fn spawn_mitm_bridge(
         "spawning mitmdump: runuser -u {} -- mitmdump --mode transparent --listen {}:{}",
         cfg.uid_user,
         cfg.listen_addr,
-        cfg.listen_port
+        bound_port
     );
 
     let mut child = cmd.spawn().map_err(|e| {
@@ -191,13 +213,16 @@ pub async fn spawn_mitm_bridge(
         }
     });
 
-    Ok(MitmBridgeHandle {
-        cache,
-        child,
-        listener_task,
-        evictor_task,
-        socket_path: cfg.socket_path.clone(),
-    })
+    Ok((
+        MitmBridgeHandle {
+            cache,
+            child,
+            listener_task,
+            evictor_task,
+            socket_path: cfg.socket_path.clone(),
+        },
+        bound_port,
+    ))
 }
 
 /// Forward each line from a child stdout/stderr into the daemon's tracing.

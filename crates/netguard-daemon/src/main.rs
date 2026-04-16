@@ -317,12 +317,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let web_addr = config.web.listen_addr.clone();
     let web_port = config.web.listen_port;
 
-    tracing::info!("Starting web UI at http://{web_addr}:{web_port}");
+    tracing::info!("Starting web UI at http://{web_addr}:{web_port} (with +20 port fallback)");
 
     tokio::select! {
         result = server::start_server(app_state, &web_addr, web_port) => {
-            if let Err(e) = result {
-                tracing::error!("Web server error: {e}");
+            match result {
+                Ok(bound_web_port) => {
+                    tracing::info!("Web server exited cleanly (was bound to port {bound_web_port})");
+                }
+                Err(e) => {
+                    tracing::error!("Web server error: {e}");
+                }
             }
         }
         _ = shutdown_clone.notified() => {

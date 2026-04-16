@@ -2,10 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
     tags: ['v*']
-  pull_request:
-    branches: [master, main]
   workflow_dispatch:
 
 env:
@@ -138,9 +135,13 @@ jobs:
           - arch: x86_64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            nfpm_arch: amd64
+            nfpm_asset_arch: x86_64
           - arch: aarch64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            nfpm_arch: arm64
+            nfpm_asset_arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -188,13 +189,44 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+            # Strip leading 'v' for nfpm — versions must start with a digit.
+            NFPM_VERSION="${VERSION#v}"
           else
-            # Dev build — use short SHA so artifacts from different commits
-            # don't collide and are traceable.
-            VERSION="dev-$(git rev-parse --short HEAD)"
+            # Dev build: lexically sortable, all three formats accept dashes.
+            TS="$(date -u +%s)"
+            SHA="$(git rev-parse --short HEAD)"
+            VERSION="dev-$SHA"
+            NFPM_VERSION="0.0.0-dev.${TS}.${SHA}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
+          echo "nfpm_version=$NFPM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION (nfpm: $NFPM_VERSION)"
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.41.0
+          curl -fsSL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm_asset_arch }}.tar.gz"
+          sudo tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build packages (deb, rpm, archlinux)
+        env:
+          NFPM_ARCH: ${{ matrix.nfpm_arch }}
+          NFPM_VERSION: ${{ steps.version.outputs.nfpm_version }}
+          CARGO_TARGET: ${{ matrix.target }}
+        working-directory: packaging
+        run: |
+          mkdir -p ../dist
+          # nfpm 2.41.0 expands env vars in top-level fields (arch, version)
+          # but NOT in contents[].src paths. Pre-render with envsubst so the
+          # binary path resolves correctly.
+          envsubst < nfpm.yaml > /tmp/nfpm.rendered.yaml
+          for fmt in deb rpm archlinux; do
+            nfpm pkg --packager "$fmt" --config /tmp/nfpm.rendered.yaml --target ../dist/
+          done
+          ( cd ../dist && sha256sum netguard* > packages.sha256 )
+          ls -la ../dist/
 
       - name: Package tarball
         id: package
@@ -221,7 +253,149 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/packages.sha256
           retention-days: 30
+
+  # ------------------------------------------------------------------
+  # Smoke tests — install each package in a distro-native container and
+  # verify packaging metadata. We do NOT try to run systemd as PID 1:
+  # GitHub Actions injects its own entrypoint, so real `systemctl start`
+  # can't work. Instead we:
+  #   1. install the package (postinstall skips service enable if systemd
+  #      isn't active — see packaging/scripts/postinstall.sh),
+  #   2. verify expected files/users/dirs landed,
+  #   3. run `systemd-analyze verify` on the unit file to catch syntax bugs,
+  #   4. uninstall and verify clean removal.
+  # The NFQUEUE kernel path isn't exercisable in CI anyway, so "does it
+  # actually boot" coverage wouldn't be possible even with systemd PID 1.
+  # x86_64 only; aarch64 install-script parity is enforced by the shared
+  # postinstall.sh, so re-running on ARM adds ~15 CI-minutes for nothing.
+  # ------------------------------------------------------------------
+  smoke-deb:
+    name: Smoke (deb / debian:12)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    container:
+      image: debian:12
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: netguard-x86_64
+          path: dist
+
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y systemd ca-certificates curl procps
+
+      - name: Install package
+        run: apt-get install -y ./dist/netguard_*_amd64.deb
+
+      - name: Verify file layout + unit syntax
+        run: |
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
+
+      - name: Uninstall
+        run: |
+          apt-get remove -y netguard
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          test ! -x /usr/local/bin/netguard                  || { echo "binary leaked"; exit 1; }
+          echo "clean removal"
+
+  smoke-rpm:
+    name: Smoke (rpm / fedora:40)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    container:
+      image: fedora:40
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: netguard-x86_64
+          path: dist
+
+      - name: Install base tools + mitmproxy
+        run: |
+          dnf install -y systemd ca-certificates curl procps-ng
+          # mitmproxy is a hard dep of the rpm; install it separately so dnf's
+          # dep resolver of `./netguard-*.rpm` doesn't have to find it.
+          dnf install -y mitmproxy
+
+      - name: Install package
+        run: dnf install -y ./dist/netguard-*.x86_64.rpm
+
+      - name: Verify file layout + unit syntax
+        run: |
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
+
+      - name: Uninstall
+        run: |
+          dnf remove -y netguard
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          echo "clean removal"
+
+  smoke-arch:
+    name: Smoke (archlinux)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    container:
+      image: archlinux:base
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: netguard-x86_64
+          path: dist
+
+      - name: Install base tools
+        run: |
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm systemd ca-certificates curl procps-ng mitmproxy
+
+      - name: Install package
+        run: pacman -U --noconfirm ./dist/netguard-*.pkg.tar.zst
+
+      - name: Verify file layout + unit syntax
+        run: |
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
+
+      - name: Uninstall
+        run: |
+          pacman -R --noconfirm netguard
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          echo "clean removal"
 
   # ------------------------------------------------------------------
   # Release job — only runs on tag push (e.g. v0.2.0). Collects the
@@ -230,7 +404,7 @@ jobs:
   # ------------------------------------------------------------------
   release:
     name: Release
-    needs: [lint, test, build]
+    needs: [lint, test, build, smoke-deb, smoke-rpm, smoke-arch]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -254,6 +428,10 @@ jobs:
           files: |
             release-artifacts/*.tar.gz
             release-artifacts/*.sha256
+            release-artifacts/*.deb
+            release-artifacts/*.rpm
+            release-artifacts/*.pkg.tar.zst
+            release-artifacts/packages.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
@@ -263,19 +441,32 @@ jobs:
 
             ### Install
 
+            **Debian / Ubuntu:**
+            ```bash
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard_${{ github.ref_name }}_amd64.deb
+            sudo apt install ./netguard_${{ github.ref_name }}_amd64.deb
+            ```
+
+            **Fedora / RHEL:**
+            ```bash
+            sudo dnf install https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}.x86_64.rpm
+            ```
+
+            **Arch Linux:**
+            ```bash
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}-x86_64.pkg.tar.zst
+            sudo pacman -U netguard-${{ github.ref_name }}-x86_64.pkg.tar.zst
+            ```
+
+            **Tarball (any distro):**
             ```bash
             curl -fsSL -o netguard.tar.gz \
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}-x86_64-linux.tar.gz
             tar -xzf netguard.tar.gz
             cd netguard-${{ github.ref_name }}-x86_64-linux
-            ./deploy.sh                    # provisioning only
-            ./deploy.sh --enable-mitm      # also flip HTTPS decrypt on
+            ./deploy.sh
             ```
 
-            Each tarball contains:
-            - `netguard` — daemon binary (frontend embedded via rust-embed)
-            - `netguard.toml` — default config
-            - `netguard.service` — systemd unit
-            - `deploy.sh` — installer
+            **All install paths are "safe mode" by default:** mitmproxy stays disabled until you opt in via the web UI toggle. HTTPS decryption never happens on install.
 
-            Verify with `sha256sum -c netguard-*.tar.gz.sha256`.
+            Verify with `sha256sum -c packages.sha256` (packages) or the matching `.sha256` file (tarball).

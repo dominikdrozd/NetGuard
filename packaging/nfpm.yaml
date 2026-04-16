@@ -1,0 +1,93 @@
+# nfpm config for NetGuard — consumed by `nfpm pkg --packager {deb|rpm|archlinux}`.
+#
+# Environment variables required at pkg time:
+#   NFPM_ARCH      — amd64 | arm64   (Debian naming; nfpm auto-translates)
+#   NFPM_VERSION   — e.g. 1.2.3 or 0.0.0-dev.1713296312.abc1234
+#   CARGO_TARGET   — e.g. x86_64-unknown-linux-gnu (to locate the built binary)
+#
+# Invoke from repo-root `packaging/` directory so relative paths resolve.
+
+name: netguard
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: net
+priority: optional
+maintainer: "Dominik Drozd <dominik@jchs.software>"
+description: |
+  NetGuard — Linux application firewall.
+  Per-application outbound connection control via NFQUEUE, with optional
+  transparent HTTPS decryption through a privilege-separated mitmproxy.
+vendor: "Dominik Drozd"
+homepage: "https://github.com/dominikdrozd/NetGuard"
+license: MIT
+
+depends:
+  - iptables
+  - libnetfilter-queue1
+  - libnfnetlink0
+  - libmnl0
+  - mitmproxy
+  - ca-certificates
+
+contents:
+  - src: ../target/${CARGO_TARGET}/release/netguard
+    dst: /usr/local/bin/netguard
+    file_info:
+      mode: 0755
+
+  - src: ../config/netguard.toml
+    dst: /usr/share/netguard/netguard.toml
+    file_info:
+      mode: 0644
+
+  - src: ../systemd/netguard.service
+    dst: /usr/lib/systemd/system/netguard.service
+    file_info:
+      mode: 0644
+
+  - src: ./scripts/_action.sh
+    dst: /usr/share/netguard/_action.sh
+    file_info:
+      mode: 0755
+
+  - src: ../LICENSE
+    dst: /usr/share/doc/netguard/LICENSE
+    file_info:
+      mode: 0644
+    packager: deb
+
+  - src: ../LICENSE
+    dst: /usr/share/doc/netguard/LICENSE
+    file_info:
+      mode: 0644
+    packager: rpm
+
+  - src: ../LICENSE
+    dst: /usr/share/licenses/netguard/LICENSE
+    file_info:
+      mode: 0644
+    packager: archlinux
+
+scripts:
+  postinstall: ./scripts/postinstall.sh
+  preremove: ./scripts/preremove.sh
+  postremove: ./scripts/postremove.sh
+
+overrides:
+  rpm:
+    depends:
+      - iptables
+      - libnetfilter_queue
+      - libnfnetlink
+      - libmnl
+      - mitmproxy
+      - ca-certificates
+  archlinux:
+    depends:
+      - iptables
+      - libnetfilter_queue
+      - libnfnetlink
+      - libmnl
+      - mitmproxy
+      - ca-certificates-utils

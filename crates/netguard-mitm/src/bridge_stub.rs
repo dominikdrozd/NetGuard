@@ -30,7 +30,7 @@ impl MitmBridgeHandle {
 pub async fn spawn_mitm_bridge(
     _cfg: MitmBridgeConfig,
     _cache: Arc<MitmFlowCache>,
-) -> std::io::Result<MitmBridgeHandle> {
+) -> std::io::Result<(MitmBridgeHandle, u16)> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "mitmproxy bridge is only supported on Unix targets",

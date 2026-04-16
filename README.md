@@ -82,6 +82,20 @@ A per-process network firewall for Linux, similar to [Little Snitch](https://obd
 
 ## Installation
 
+### Install from a native package (recommended)
+
+Grab the right file for your distro from [Releases](https://github.com/dominikdrozd/NetGuard/releases):
+
+| Distro | Command |
+|---|---|
+| Debian / Ubuntu | `sudo apt install ./netguard_<VER>_amd64.deb` |
+| Fedora / RHEL | `sudo dnf install ./netguard-<VER>.x86_64.rpm` |
+| Arch Linux | `sudo pacman -U netguard-<VER>-x86_64.pkg.tar.zst` |
+
+The package pulls in runtime deps (`iptables`, `libnetfilter_queue`, `mitmproxy`, `ca-certificates`), creates the `netguard-mitm` system user, seeds config under `/etc/netguard/`, bootstraps the mitmproxy CA without trusting it system-wide, and starts `netguard.service`. HTTPS decryption is **off by default** — enable it from the web UI sidebar when you're ready.
+
+aarch64 (`arm64`) builds are published alongside the `amd64`/`x86_64` ones — substitute the architecture suffix in the filename.
+
 ### Quick Install (Debian/Ubuntu)
 
 ```bash
