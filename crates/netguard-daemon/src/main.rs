@@ -203,11 +203,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Start async event processor (logging + UI broadcast)
+    // Start async event processor (logging + UI broadcast + DNS resolution)
     let event_broadcast_tx = ws_broadcast_tx.clone();
     let event_log = connection_log.clone();
+    let event_dns_cache = dns_cache.clone();
     tokio::spawn(async move {
-        resolver::run_event_processor(tokio_event_rx, event_broadcast_tx, event_log).await;
+        resolver::run_event_processor(tokio_event_rx, event_broadcast_tx, event_log, event_dns_cache).await;
     });
 
     // Start web server (runs until shutdown)

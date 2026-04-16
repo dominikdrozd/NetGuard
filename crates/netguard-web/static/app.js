@@ -13,7 +13,6 @@
     const CONNECTIONS_LIMIT = 50;
 
     // ── Auth ──
-    // Token is stored in sessionStorage after user authenticates (never embedded in HTML)
     let API_TOKEN = sessionStorage.getItem('netguard_token') || '';
 
     // ── Security helpers ──
@@ -34,6 +33,37 @@
     const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => document.querySelectorAll(sel);
 
+    // ── Event delegation: handle all clicks via data-action attributes ──
+    document.addEventListener('click', (e) => {
+        const el = e.target.closest('[data-action]');
+        if (!el) return;
+        const action = el.dataset.action;
+        const id = el.dataset.id;
+
+        switch (action) {
+            case 'show-packet':
+                showPacketDetail(id);
+                break;
+            case 'toggle-rule':
+                toggleRule(id);
+                break;
+            case 'delete-rule':
+                deleteRule(id);
+                break;
+            case 'respond-prompt':
+                respondPrompt(id, el.dataset.verdict, el.dataset.remember === 'true');
+                break;
+        }
+    });
+
+    // Event delegation for checkbox changes (toggle rules)
+    document.addEventListener('change', (e) => {
+        const el = e.target.closest('[data-toggle-rule]');
+        if (el) {
+            toggleRule(el.dataset.toggleRule);
+        }
+    });
+
     // ── Navigation ──
     $$('.nav-item[data-page]').forEach(item => {
         item.addEventListener('click', () => {
@@ -50,7 +80,6 @@
 
     // ── WebSocket ──
     async function connectWs() {
-        // Obtain a one-time ticket via authenticated API call (token never in URL)
         let ticket;
         try {
             const res = await fetch('/ws-ticket', {
@@ -68,20 +97,14 @@
             $('#ws-status').className = 'status-dot connected';
             $('#ws-status-text').textContent = 'Connected';
         };
-
         ws.onclose = () => {
             $('#ws-status').className = 'status-dot disconnected';
             $('#ws-status-text').textContent = 'Disconnected';
             setTimeout(connectWs, 3000);
         };
-
         ws.onerror = () => ws.close();
-
         ws.onmessage = (evt) => {
-            try {
-                const msg = JSON.parse(evt.data);
-                handleWsEvent(msg);
-            } catch (e) { /* ignore malformed messages */ }
+            try { handleWsEvent(JSON.parse(evt.data)); } catch (e) {}
         };
     }
 
@@ -159,7 +182,7 @@
             return;
         }
         el.innerHTML = recent.map(c => `
-            <div class="stream-entry clickable" onclick="window.showPacketDetail('${esc(c.id)}')">
+            <div class="stream-entry clickable" data-action="show-packet" data-id="${c.id}">
                 <span class="badge ${esc(c.verdict)}">${esc(c.verdict)}</span>
                 <span class="app-name truncate">${esc(appName(c))}</span>
                 <span class="dest text-mono">${c.hostname ? esc(c.hostname) : esc(c.dst_ip)}:${esc(c.dst_port)}</span>
@@ -193,7 +216,7 @@
             stats = await api('/stats');
             renderStats();
             renderTopApps();
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
     }
 
     // ── Connections ──
@@ -204,7 +227,7 @@
             if (reset) connections = data;
             else connections.push(...data);
             renderConnectionsTable();
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
     }
 
     function renderConnectionsTable() {
@@ -220,7 +243,7 @@
         });
 
         $('#connections-table').innerHTML = filtered.map(c => `
-            <tr class="clickable" onclick="window.showPacketDetail('${esc(c.id)}')">
+            <tr class="clickable" data-action="show-packet" data-id="${c.id}">
                 <td class="text-mono">${esc(formatTime(c.timestamp))}</td>
                 <td class="truncate">${esc(appName(c))}</td>
                 <td class="domain-label truncate">${esc(c.hostname || '-')}</td>
@@ -248,7 +271,7 @@
         try {
             rules = await api('/rules');
             renderRulesTable();
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
     }
 
     function renderRulesTable() {
@@ -257,10 +280,10 @@
             return;
         }
         $('#rules-table').innerHTML = rules.map(r => `
-            <tr data-id="${esc(r.id)}">
+            <tr data-id="${r.id}">
                 <td>
                     <label class="toggle">
-                        <input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="window.toggleRule('${esc(r.id)}')">
+                        <input type="checkbox" ${r.enabled ? 'checked' : ''} data-toggle-rule="${r.id}">
                         <span class="slider"></span>
                     </label>
                 </td>
@@ -272,27 +295,27 @@
                 <td><span class="badge ${esc(r.verdict)}">${esc(r.verdict)}</span></td>
                 <td>${esc(r.hit_count)}</td>
                 <td>
-                    <button class="btn btn-sm btn-danger" onclick="window.deleteRule('${esc(r.id)}')">Delete</button>
+                    <button class="btn btn-sm btn-danger" data-action="delete-rule" data-id="${r.id}">Delete</button>
                 </td>
             </tr>
         `).join('');
     }
 
-    window.toggleRule = async (id) => {
+    async function toggleRule(id) {
         try {
             await api(`/rules/${id}/toggle`, { method: 'PATCH' });
             loadRules();
         } catch (e) { alert('Failed to toggle rule: ' + e.message); }
-    };
+    }
 
-    window.deleteRule = async (id) => {
+    async function deleteRule(id) {
         if (!confirm('Delete this rule?')) return;
         try {
             await api(`/rules/${id}`, { method: 'DELETE' });
             rules = rules.filter(r => r.id !== id);
             renderRulesTable();
         } catch (e) { alert('Failed to delete rule: ' + e.message); }
-    };
+    }
 
     $('#add-rule-btn')?.addEventListener('click', () => {
         $('#rule-modal').classList.remove('hidden');
@@ -337,7 +360,7 @@
             return;
         }
         overlay.innerHTML = prompts.map(p => `
-            <div class="prompt-card" data-id="${esc(p.id)}">
+            <div class="prompt-card" data-prompt-id="${p.id}">
                 <div class="prompt-title">New Connection Detected</div>
                 <div class="prompt-details">
                     <div><strong>App:</strong> ${esc(appName(p.connection))}</div>
@@ -346,7 +369,7 @@
                     <div><strong>PID:</strong> ${esc(p.connection.process?.pid || 'unknown')}</div>
                 </div>
                 <div class="prompt-scope">
-                    <select id="scope-${esc(p.id)}">
+                    <select class="prompt-scope-select" data-prompt-id="${p.id}">
                         <option value="app_to_destination">This app to this destination</option>
                         <option value="app_anywhere">This app to anywhere</option>
                         <option value="app_to_port">This app to this port</option>
@@ -354,17 +377,17 @@
                     </select>
                 </div>
                 <div class="prompt-actions" style="margin-top:8px">
-                    <button class="btn btn-sm btn-success" onclick="window.respondPrompt('${esc(p.id)}', 'allow', true)">Allow & Remember</button>
-                    <button class="btn btn-sm btn-deny" onclick="window.respondPrompt('${esc(p.id)}', 'deny', true)">Deny & Remember</button>
-                    <button class="btn btn-sm" onclick="window.respondPrompt('${esc(p.id)}', 'allow', false)">Allow Once</button>
-                    <button class="btn btn-sm" onclick="window.respondPrompt('${esc(p.id)}', 'deny', false)">Deny Once</button>
+                    <button class="btn btn-sm btn-success" data-action="respond-prompt" data-id="${p.id}" data-verdict="allow" data-remember="true">Allow &amp; Remember</button>
+                    <button class="btn btn-sm btn-deny" data-action="respond-prompt" data-id="${p.id}" data-verdict="deny" data-remember="true">Deny &amp; Remember</button>
+                    <button class="btn btn-sm" data-action="respond-prompt" data-id="${p.id}" data-verdict="allow" data-remember="false">Allow Once</button>
+                    <button class="btn btn-sm" data-action="respond-prompt" data-id="${p.id}" data-verdict="deny" data-remember="false">Deny Once</button>
                 </div>
             </div>
         `).join('');
     }
 
-    window.respondPrompt = async (id, verdict, remember) => {
-        const scopeEl = $(`#scope-${id}`);
+    async function respondPrompt(id, verdict, remember) {
+        const scopeEl = $(`.prompt-scope-select[data-prompt-id="${id}"]`);
         const scope = scopeEl ? scopeEl.value : 'app_to_destination';
         try {
             await api(`/prompts/${id}/respond`, {
@@ -375,25 +398,19 @@
             renderPrompts();
         } catch (e) {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'respond_prompt',
-                    prompt_id: id,
-                    verdict,
-                    remember,
-                    scope,
-                }));
+                ws.send(JSON.stringify({ type: 'respond_prompt', prompt_id: id, verdict, remember, scope }));
                 delete pendingPrompts[id];
                 renderPrompts();
             }
         }
-    };
+    }
 
     // ── Logs ──
     async function loadLogs() {
         try {
             const data = await api('/connections?limit=200&offset=0');
             renderLogsTable(data);
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
     }
 
     function renderLogsTable(data) {
@@ -402,11 +419,12 @@
             if (!search) return true;
             return appName(c).toLowerCase().includes(search)
                 || String(c.dst_ip).includes(search)
-                || String(c.dst_port).includes(search);
+                || String(c.dst_port).includes(search)
+                || (c.hostname && c.hostname.toLowerCase().includes(search));
         });
 
         $('#logs-table').innerHTML = filtered.map(c => `
-            <tr>
+            <tr class="clickable" data-action="show-packet" data-id="${c.id}">
                 <td class="text-mono">${esc(formatTime(c.timestamp))}</td>
                 <td class="truncate">${esc(appName(c))}</td>
                 <td class="text-mono">${esc(c.src_ip)}:${esc(c.src_port)}</td>
@@ -421,11 +439,12 @@
     $('#log-search')?.addEventListener('input', () => loadLogs());
 
     $('#export-csv')?.addEventListener('click', () => {
-        const header = 'Time,Application,Source,Destination,Protocol,Verdict,Rule ID\n';
+        const header = 'Time,Application,Domain,Source,Destination,Protocol,Verdict,Rule ID\n';
         const rows = connections.map(c =>
             [
                 csvEsc(c.timestamp),
                 csvEsc(appName(c)),
+                csvEsc(c.hostname || ''),
                 csvEsc(c.src_ip + ':' + c.src_port),
                 csvEsc(c.dst_ip + ':' + c.dst_port),
                 csvEsc(c.protocol),
@@ -444,20 +463,11 @@
 
     // ── Helpers ──
     function appName(conn) {
-        if (conn.process) {
-            return basename(conn.process.exe_path) || conn.process.exe_path;
-        }
+        if (conn.process) return basename(conn.process.exe_path) || conn.process.exe_path;
         return 'unknown';
     }
-
-    function basename(path) {
-        return path.split('/').pop() || path;
-    }
-
-    function formatTime(ts) {
-        return new Date(ts).toLocaleTimeString();
-    }
-
+    function basename(path) { return path.split('/').pop() || path; }
+    function formatTime(ts) { return new Date(ts).toLocaleTimeString(); }
     function timeAgo(ts) {
         const sec = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
         if (sec < 5) return 'just now';
@@ -465,7 +475,6 @@
         if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
         return Math.floor(sec / 3600) + 'h ago';
     }
-
     function formatSize(bytes) {
         if (!bytes) return '-';
         if (bytes < 1024) return bytes + ' B';
@@ -491,7 +500,7 @@
     }
 
     // ── Packet Detail Modal ──
-    window.showPacketDetail = (id) => {
+    function showPacketDetail(id) {
         const c = connections.find(x => x.id === id);
         if (!c) return;
 
@@ -500,7 +509,7 @@
             <div class="pkt-row"><span class="pkt-label">Time</span><span class="pkt-value">${esc(new Date(c.timestamp).toLocaleString())}</span></div>
             <div class="pkt-row"><span class="pkt-label">Application</span><span class="pkt-value">${esc(c.process ? c.process.exe_path : 'unknown')}</span></div>
             <div class="pkt-row"><span class="pkt-label">Command</span><span class="pkt-value">${esc(c.process ? c.process.cmdline : '-')}</span></div>
-            <div class="pkt-row"><span class="pkt-label">PID / UID</span><span class="pkt-value">${esc(c.process ? c.process.pid + ' / ' + c.process.username : '-')}</span></div>
+            <div class="pkt-row"><span class="pkt-label">PID / User</span><span class="pkt-value">${esc(c.process ? c.process.pid + ' / ' + (c.process.username || c.process.uid) : '-')}</span></div>
             <div class="pkt-row"><span class="pkt-label">Domain</span><span class="pkt-value domain-label">${esc(c.hostname || 'not resolved')}</span></div>
             <div class="pkt-row"><span class="pkt-label">Direction</span><span class="pkt-value">${esc(c.direction)}</span></div>
             <div class="pkt-row"><span class="pkt-label">Source</span><span class="pkt-value text-mono">${esc(c.src_ip)}:${esc(c.src_port)}</span></div>
@@ -511,11 +520,11 @@
             <div class="pkt-row"><span class="pkt-label">Rule ID</span><span class="pkt-value text-mono">${esc(c.rule_id || 'none')}</span></div>
             <div style="margin-top:12px">
                 <div class="pkt-label" style="margin-bottom:6px">Payload (hex + ASCII)</div>
-                <div class="hex-dump">${c.payload_hex ? esc(hexToAsciiLine(c.payload_hex)) : '<em>No payload data</em>'}</div>
+                <div class="hex-dump">${c.payload_hex ? esc(hexToAsciiLine(c.payload_hex)) : 'No payload data'}</div>
             </div>
         `;
         $('#packet-modal').classList.remove('hidden');
-    };
+    }
 
     $('#packet-modal-close')?.addEventListener('click', () => {
         $('#packet-modal').classList.add('hidden');
@@ -567,11 +576,7 @@
 
     // ── Init ──
     async function init() {
-        if (!API_TOKEN) {
-            showLogin();
-            return;
-        }
-        // Validate stored token still works
+        if (!API_TOKEN) { showLogin(); return; }
         try {
             const res = await fetch('/auth/validate-token', { method: 'POST', body: API_TOKEN });
             if (!res.ok) {
@@ -580,10 +585,7 @@
                 showLogin();
                 return;
             }
-        } catch (e) {
-            showLogin();
-            return;
-        }
+        } catch (e) { showLogin(); return; }
 
         connectWs();
         refreshDashboard();
