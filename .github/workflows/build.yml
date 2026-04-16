@@ -218,8 +218,12 @@ jobs:
         working-directory: packaging
         run: |
           mkdir -p ../dist
+          # nfpm 2.41.0 expands env vars in top-level fields (arch, version)
+          # but NOT in contents[].src paths. Pre-render with envsubst so the
+          # binary path resolves correctly.
+          envsubst < nfpm.yaml > /tmp/nfpm.rendered.yaml
           for fmt in deb rpm archlinux; do
-            nfpm pkg --packager "$fmt" --config nfpm.yaml --target ../dist/
+            nfpm pkg --packager "$fmt" --config /tmp/nfpm.rendered.yaml --target ../dist/
           done
           ( cd ../dist && sha256sum netguard* > packages.sha256 )
           ls -la ../dist/
