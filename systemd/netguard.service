@@ -10,11 +10,21 @@ ExecStopPost=/usr/local/bin/netguard --cleanup
 Restart=on-failure
 RestartSec=5
 
+# /run/netguard is created with mode 0755 on start and cleaned up on stop.
+# Used for the mitmproxy unix socket (/run/netguard/mitm.sock).
+RuntimeDirectory=netguard
+RuntimeDirectoryMode=0755
+
 # Security hardening
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/netguard /var/log/netguard /var/run
+# Writable paths the daemon needs:
+#   /etc/netguard       — API token, rules.json (atomic rename)
+#   /var/log/netguard   — connection log (JSONL, chmod 600)
+#   /var/lib/netguard   — mitmproxy confdir (addon.py, CA cert)
+#   /run/netguard       — unix socket for mitmproxy flow records
+ReadWritePaths=/etc/netguard /var/log/netguard /var/lib/netguard /run/netguard
 
 [Install]
 WantedBy=multi-user.target
