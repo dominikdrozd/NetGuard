@@ -64,6 +64,10 @@ pub struct MitmProxyController {
 struct ControllerState {
     enabled: bool,
     bridge: Option<MitmBridgeHandle>,
+    /// Port mitmdump is actually listening on. `None` while the bridge is
+    /// disabled. Written by `enable()` on successful bridge start; cleared
+    /// by `disable()`.
+    bound_listen_port: Option<u16>,
 }
 
 impl MitmProxyController {
@@ -86,6 +90,7 @@ impl MitmProxyController {
             state: Mutex::new(ControllerState {
                 enabled: false,
                 bridge: None,
+                bound_listen_port: None,
             }),
             ca_cert_path,
             allow_runtime_toggle,
@@ -109,10 +114,11 @@ impl MitmProxyController {
 
     pub async fn status(&self) -> MitmControllerStatus {
         let state = self.state.lock().await;
+        let listen_port = state.bound_listen_port.unwrap_or(self.bridge_cfg.listen_port);
         MitmControllerStatus {
             enabled: state.enabled,
             listen_addr: self.bridge_cfg.listen_addr.clone(),
-            listen_port: self.bridge_cfg.listen_port,
+            listen_port,
             ca_cert_path: self.ca_cert_path.clone(),
             ca_cert_installed: tokio::fs::try_exists(&self.ca_cert_path)
                 .await
@@ -157,13 +163,17 @@ impl MitmProxyController {
         if state.enabled {
             return Ok(());
         }
-        let handle = spawn_mitm_bridge(self.bridge_cfg.clone(), self.flow_cache.clone())
+        let (handle, port) = spawn_mitm_bridge(self.bridge_cfg.clone(), self.flow_cache.clone())
             .await
             .map_err(|e| MitmError::Spawn(e.to_string()))?;
         // Give mitmdump ~800ms to bind its listener before REDIRECT starts
         // steering traffic at it, otherwise early connections get refused.
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        if let Err(e) = install_redirect(self.bridge_cfg.uid, self.bridge_cfg.listen_port) {
+        // Use the actual bound port, not the configured one: the port-probe
+        // fallback in spawn_mitm_bridge may have picked a different port if
+        // the configured one was busy, and the REDIRECT rule has to point
+        // at the real listener or interception silently breaks.
+        if let Err(e) = install_redirect(self.bridge_cfg.uid, port) {
             tracing::error!("failed to install REDIRECT rules: {e}");
             // Tear the half-started bridge down cleanly: SIGKILL mitmdump,
             // await reap, remove socket, abort tasks. Otherwise the port
@@ -172,6 +182,7 @@ impl MitmProxyController {
             return Err(MitmError::Iptables(e));
         }
         state.bridge = Some(handle);
+        state.bound_listen_port = Some(port);
         state.enabled = true;
         tracing::info!("mitmproxy enabled");
         Ok(())
@@ -199,8 +210,19 @@ impl MitmProxyController {
         if let Some(handle) = bridge {
             handle.shutdown().await;
         }
+        // Clear the bound port only after the bridge has actually been torn
+        // down, so a concurrent `bound_listen_port()` reader won't observe a
+        // stale port pointing at a mitmdump that's already dead.
+        self.state.lock().await.bound_listen_port = None;
         tracing::info!("mitmproxy disabled");
         Ok(())
+    }
+
+    /// Port mitmdump is actually listening on, or `None` when disabled.
+    /// Differs from `self.bridge_cfg.listen_port` when the port-probe
+    /// fallback selected a different port at startup.
+    pub async fn bound_listen_port(&self) -> Option<u16> {
+        self.state.lock().await.bound_listen_port
     }
 }
 
