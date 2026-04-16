@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     #[serde(default = "ProcConfig::default")]
     pub proc: ProcConfig,
+    #[serde(default = "MitmproxyConfig::default")]
+    pub mitmproxy: MitmproxyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,34 @@ pub struct ProcConfig {
     pub cache_refresh_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MitmproxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_mitm_listen_addr")]
+    pub listen_addr: String,
+    #[serde(default = "default_mitm_listen_port")]
+    pub listen_port: u16,
+    #[serde(default = "default_mitm_socket_path")]
+    pub socket_path: String,
+    #[serde(default = "default_mitm_confdir")]
+    pub confdir: String,
+    #[serde(default = "default_mitm_uid_user")]
+    pub uid_user: String,
+    #[serde(default = "default_mitm_max_body_size")]
+    pub max_body_size_bytes: usize,
+    #[serde(default = "default_mitm_idle_timeout")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub persist_bodies: bool,
+    /// If false (default), the web UI cannot toggle mitmproxy at runtime.
+    /// Enabling mitmproxy then requires editing this config file as root and
+    /// restarting the daemon. Turn this on only if you trust everyone who
+    /// holds the API token to be able to start a MITM proxy at will.
+    #[serde(default)]
+    pub allow_runtime_toggle: bool,
+}
+
 fn default_queue_num() -> u16 { 0 }
 fn default_verdict() -> String { "deny".into() }
 fn default_prompt_timeout() -> u64 { 15 }
@@ -91,6 +121,13 @@ fn default_max_memory_entries() -> usize { 10000 }
 fn default_cache_refresh_ms() -> u64 { 2000 }
 fn default_true() -> bool { true }
 fn default_auth_token_file() -> String { "/etc/netguard/api_token".into() }
+fn default_mitm_listen_addr() -> String { "127.0.0.1".into() }
+fn default_mitm_listen_port() -> u16 { 8080 }
+fn default_mitm_socket_path() -> String { "/run/netguard/mitm.sock".into() }
+fn default_mitm_confdir() -> String { "/var/lib/netguard/mitm".into() }
+fn default_mitm_uid_user() -> String { "netguard-mitm".into() }
+fn default_mitm_max_body_size() -> usize { 1_048_576 }
+fn default_mitm_idle_timeout() -> u64 { 10 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -152,6 +189,23 @@ impl Default for ProcConfig {
     }
 }
 
+impl Default for MitmproxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_mitm_listen_addr(),
+            listen_port: default_mitm_listen_port(),
+            socket_path: default_mitm_socket_path(),
+            confdir: default_mitm_confdir(),
+            uid_user: default_mitm_uid_user(),
+            max_body_size_bytes: default_mitm_max_body_size(),
+            idle_timeout_secs: default_mitm_idle_timeout(),
+            persist_bodies: true,
+            allow_runtime_toggle: false,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -161,6 +215,7 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             network: NetworkConfig::default(),
             proc: ProcConfig::default(),
+            mitmproxy: MitmproxyConfig::default(),
         }
     }
 }
@@ -175,4 +230,41 @@ impl AppConfig {
     pub fn rules_path(&self) -> PathBuf {
         PathBuf::from(&self.rules.rules_file)
     }
+}
+
+/// Resolve a system username to its numeric UID and primary GID using getpwnam.
+/// Returns an error for empty names, names that don't resolve, and names whose
+/// UID is root or a low-numbered system UID (UID < 1000 is disallowed because
+/// installing an owner-match RETURN rule for root or a core system service
+/// would turn the firewall into a free bypass for anything running under that
+/// UID).
+#[cfg(target_os = "linux")]
+pub fn resolve_system_user(name: &str) -> Result<(u32, u32), NetGuardError> {
+    use std::ffi::CString;
+    if name.is_empty() {
+        return Err(NetGuardError::Config("mitmproxy uid_user is empty".into()));
+    }
+    let cname = CString::new(name)
+        .map_err(|_| NetGuardError::Config(format!("mitmproxy uid_user '{name}' contains NUL")))?;
+    let entry = unsafe { libc::getpwnam(cname.as_ptr()) };
+    if entry.is_null() {
+        return Err(NetGuardError::Config(format!(
+            "mitmproxy uid_user '{name}' does not exist on this system"
+        )));
+    }
+    let uid = unsafe { (*entry).pw_uid };
+    let gid = unsafe { (*entry).pw_gid };
+    if uid < 1000 {
+        return Err(NetGuardError::Config(format!(
+            "mitmproxy uid_user '{name}' resolved to UID {uid} (< 1000). Refusing to install owner-match rules for a system or root UID."
+        )));
+    }
+    Ok((uid, gid))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn resolve_system_user(_name: &str) -> Result<(u32, u32), NetGuardError> {
+    Err(NetGuardError::Config(
+        "resolve_system_user is only implemented on Linux".into(),
+    ))
 }

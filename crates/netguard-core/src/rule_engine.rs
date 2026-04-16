@@ -352,6 +352,11 @@ mod tests {
             request_url: None,
             payload_hex: None,
             packet_size: 0,
+            decrypted_request_headers: None,
+            decrypted_request_body: None,
+            decrypted_response_status: None,
+            decrypted_response_headers: None,
+            decrypted_response_body: None,
         }
     }
 

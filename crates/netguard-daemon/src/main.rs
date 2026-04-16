@@ -7,6 +7,7 @@ use netguard_nfq::dns::DnsCache;
 use netguard_nfq::procmap::ProcMapper;
 use netguard_nfq::queue::{self, PacketEvent};
 use netguard_nfq::resolver;
+use netguard_mitm::{MitmBridgeConfig, MitmProxyController};
 use netguard_web::server;
 use netguard_web::state::AppState;
 use std::collections::HashMap;
@@ -89,8 +90,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     ));
 
-    // Create connection log
-    let connection_log = Arc::new(ConnectionLog::new(config.logging.max_memory_entries));
+    // Create connection log with optional on-disk JSONL persistence.
+    // Disk writes capture full records (including decrypted bodies when
+    // mitmproxy is enabled), chmod 600 so only root can read them.
+    let base_log = ConnectionLog::new(config.logging.max_memory_entries);
+    let connection_log = Arc::new(
+        match base_log.with_disk_log(
+            &config.logging.log_file,
+            config.mitmproxy.persist_bodies,
+        ) {
+            Ok(log) => {
+                tracing::info!(
+                    "connection log persisting to {} (persist_bodies={})",
+                    config.logging.log_file,
+                    config.mitmproxy.persist_bodies
+                );
+                log
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to open connection log file {}: {e} — continuing in-memory only",
+                    config.logging.log_file
+                );
+                ConnectionLog::new(config.logging.max_memory_entries)
+            }
+        },
+    );
 
     // Create channels
     let (ws_broadcast_tx, _) = broadcast::channel::<WsEvent>(4096);
@@ -98,20 +123,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pending_prompts: Arc<RwLock<HashMap<uuid::Uuid, PendingPrompt>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
-    // Create app state for web server
-    let app_state = AppState {
-        rule_engine: rule_engine.clone(),
-        connection_log: connection_log.clone(),
-        pending_prompts: pending_prompts.clone(),
-        prompt_response_tx,
-        ws_broadcast_tx: ws_broadcast_tx.clone(),
-        api_token: api_token.clone(),
-        listen_port: config.web.listen_port,
-        auth_attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
-        ws_tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
-    };
+    // Resolve the mitmproxy user's numeric UID and GID once at startup.
+    // iptables owner-match rules must use the numeric UID so they're not
+    // silently retargeted by /etc/passwd changes (package reinstall, backup
+    // restore, UID recycling). We reject UID 0 and UIDs < 1000 in the
+    // resolver itself.
+    let (mitm_uid, mitm_gid) =
+        netguard_core::config::resolve_system_user(&config.mitmproxy.uid_user)
+            .map(|(u, g)| (Some(u), Some(g)))
+            .unwrap_or_else(|e| {
+                if config.mitmproxy.enabled || config.mitmproxy.allow_runtime_toggle {
+                    tracing::warn!(
+                        "mitmproxy uid_user '{}' could not be resolved: {e}. Runtime toggle and boot-start disabled.",
+                        config.mitmproxy.uid_user
+                    );
+                }
+                (None, None)
+            });
 
-    // Setup iptables
+    // Setup iptables. The owner-match RETURN rule for mitmproxy's upstream is
+    // installed at startup iff we successfully resolved the mitm UID; that
+    // way runtime toggle-on works without re-plumbing NETGUARD_OUT. The rule
+    // is harmless when mitm is disabled because no traffic originates from
+    // that UID.
+    let mitm_redirect_cfg = mitm_uid.map(|uid| queue::MitmRedirect {
+        uid,
+        port: config.mitmproxy.listen_port,
+    });
     queue::setup_iptables(
         config.daemon.queue_num,
         config.network.intercept_outbound,
@@ -119,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.network.skip_loopback,
         config.network.skip_established,
         config.network.fail_open,
+        mitm_redirect_cfg,
     )?;
 
     // Graceful shutdown signal
@@ -148,6 +187,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         proc_mapper_clone.run_cache_refresh_loop().await;
     });
+
+    // Build the runtime mitmproxy controller. It always exists so the UI
+    // status endpoint works even when mitm is disabled; the runtime toggle
+    // endpoint itself is gated by `allow_runtime_toggle`.
+    //
+    // The flow cache TTL is tied to the resolver's per-connection idle
+    // timeout so stale entries don't hang around long enough to pollute a
+    // later connection that happens to reuse the same 4-tuple.
+    let cache_ttl = config.mitmproxy.idle_timeout_secs.saturating_mul(2).max(20);
+    let bridge_cfg = MitmBridgeConfig {
+        listen_addr: config.mitmproxy.listen_addr.clone(),
+        listen_port: config.mitmproxy.listen_port,
+        socket_path: std::path::PathBuf::from(&config.mitmproxy.socket_path),
+        confdir: std::path::PathBuf::from(&config.mitmproxy.confdir),
+        uid_user: config.mitmproxy.uid_user.clone(),
+        uid: mitm_uid.unwrap_or(0),
+        gid: mitm_gid.unwrap_or(0),
+        max_body_size_bytes: config.mitmproxy.max_body_size_bytes,
+        addon_path: std::path::PathBuf::from(&config.mitmproxy.confdir).join("addon.py"),
+        strict_ports: true,
+    };
+    let mitm_controller = Arc::new(MitmProxyController::new(
+        bridge_cfg,
+        cache_ttl,
+        config.mitmproxy.allow_runtime_toggle,
+    ));
+    let mitm_cache = Some(mitm_controller.flow_cache());
+    if (config.mitmproxy.enabled || config.mitmproxy.allow_runtime_toggle) && mitm_uid.is_none() {
+        tracing::error!(
+            "mitmproxy is enabled or runtime-toggle is on, but uid_user '{}' could not be resolved to a valid non-root UID. HTTPS decryption will refuse to start. Run deploy.sh or create a dedicated system user with UID >= 1000.",
+            config.mitmproxy.uid_user
+        );
+    }
+    if config.mitmproxy.enabled {
+        if let Err(e) = mitm_controller.enable().await {
+            // enable() itself refuses to run when uid=0 (see controller.rs)
+            tracing::error!("failed to start mitmproxy on boot: {e}");
+        }
+    }
+
+    // Create app state for web server (after controller is built so UI can toggle)
+    let app_state = AppState {
+        rule_engine: rule_engine.clone(),
+        connection_log: connection_log.clone(),
+        pending_prompts: pending_prompts.clone(),
+        prompt_response_tx,
+        ws_broadcast_tx: ws_broadcast_tx.clone(),
+        api_token: api_token.clone(),
+        listen_port: config.web.listen_port,
+        auth_attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
+        ws_tickets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        mitm_controller: mitm_controller.clone(),
+    };
 
     // Bridge channel: NFQUEUE thread (std::sync) -> async event processor (tokio)
     let (std_event_tx, std_event_rx) = std::sync::mpsc::channel::<PacketEvent>();
@@ -203,12 +295,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Start async event processor (logging + UI broadcast + DNS resolution)
+    // Start async event processor (logging + UI broadcast + DNS resolution + mitm enrichment)
     let event_broadcast_tx = ws_broadcast_tx.clone();
     let event_log = connection_log.clone();
     let event_dns_cache = dns_cache.clone();
+    let event_mitm_cache = mitm_cache.clone();
+    let event_mitm_timeout = config.mitmproxy.idle_timeout_secs;
     tokio::spawn(async move {
-        resolver::run_event_processor(tokio_event_rx, event_broadcast_tx, event_log, event_dns_cache).await;
+        resolver::run_event_processor(
+            tokio_event_rx,
+            event_broadcast_tx,
+            event_log,
+            event_dns_cache,
+            event_mitm_cache,
+            event_mitm_timeout,
+        ).await;
     });
 
     // Start web server (runs until shutdown)

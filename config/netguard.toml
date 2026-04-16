@@ -34,3 +34,27 @@ whitelist = [
 
 [proc]
 cache_refresh_ms = 2000
+
+# HTTPS decryption via transparent mitmproxy.
+# OPT-IN: leave disabled unless you have read the README section "Decrypting HTTPS content".
+# Enabling will MITM all tcp/80 and tcp/443 traffic. Cert-pinned apps (browsers with HSTS,
+# banking apps, Signal, WhatsApp, etc.) will break until you install the mitmproxy CA into
+# their trust stores. Browsers use their own NSS store -- see README for per-browser steps.
+# Decrypted request/response bodies are written to the connection log in plaintext.
+[mitmproxy]
+enabled = false
+listen_addr = "127.0.0.1"
+listen_port = 8080
+socket_path = "/run/netguard/mitm.sock"
+confdir = "/var/lib/netguard/mitm"
+uid_user = "netguard-mitm"
+max_body_size_bytes = 1048576
+idle_timeout_secs = 10
+# When true, decrypted bodies are attached to the connection record (memory
+# + on-disk JSONL). Set to false to keep only headers+status on disk.
+persist_bodies = true
+# When true, the web UI toggle can start/stop mitmproxy at runtime. When
+# false (default), enabling HTTPS decryption requires editing this file
+# as root and restarting the daemon. Leave this off unless you accept that
+# anyone with the API token can start a MITM proxy on this host.
+allow_runtime_toggle = false

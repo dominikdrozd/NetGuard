@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { useWsStore } from '../../stores/websocketStore';
+import { MitmToggle } from './MitmToggle';
 
 export function Sidebar() {
   const status = useWsStore(s => s.status);
@@ -23,6 +24,7 @@ export function Sidebar() {
         <span className="nav-icon">&#9776;</span> Logs
       </NavLink>
       <div style={{ flex: 1 }} />
+      <MitmToggle />
       <div className="nav-item" style={{ cursor: 'default' }}>
         <span className={`status-dot ${status === 'connected' ? 'connected' : 'disconnected'}`} />
         <span>{status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting...' : 'Disconnected'}</span>

@@ -72,6 +72,30 @@ pub struct Connection {
     pub payload_hex: Option<String>,
     /// Size of the full packet in bytes
     pub packet_size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_request_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnrichmentDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_request_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_request_body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_headers: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decrypted_response_body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +145,10 @@ pub enum RuleScope {
 #[serde(rename_all = "snake_case")]
 pub enum WsEvent {
     NewConnection(Connection),
+    ConnectionEnriched {
+        id: Uuid,
+        fields: EnrichmentDelta,
+    },
     Prompt(PendingPrompt),
     PromptResolved {
         prompt_id: Uuid,

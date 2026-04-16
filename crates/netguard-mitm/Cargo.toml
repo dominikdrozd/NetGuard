@@ -1,20 +1,16 @@
 [package]
-name = "netguard-nfq"
+name = "netguard-mitm"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 netguard-core = { path = "../netguard-core" }
-netguard-mitm = { path = "../netguard-mitm" }
-nfq = "0.2"
-procfs = "0.18"
 
 tokio = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
-uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

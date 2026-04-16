@@ -723,6 +723,7 @@ dependencies = [
  "chrono",
  "glob",
  "ipnet",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -742,6 +743,7 @@ dependencies = [
  "hex",
  "libc",
  "netguard-core",
+ "netguard-mitm",
  "netguard-nfq",
  "netguard-web",
  "serde_json",
@@ -752,12 +754,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "netguard-mitm"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "netguard-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "netguard-nfq"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "libc",
  "netguard-core",
+ "netguard-mitm",
  "nfq",
  "procfs",
  "serde",
@@ -776,6 +792,7 @@ dependencies = [
  "futures-util",
  "mime_guess",
  "netguard-core",
+ "netguard-mitm",
  "rust-embed",
  "serde",
  "serde_json",

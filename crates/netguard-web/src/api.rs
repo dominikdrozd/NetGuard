@@ -1,9 +1,10 @@
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::Json;
+use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Json, Response};
 use netguard_core::models::*;
 use serde::Deserialize;
+use std::net::SocketAddr;
 use tracing::info;
 use uuid::Uuid;
 
@@ -221,4 +222,102 @@ pub async fn respond_prompt(
 pub async fn get_stats(State(state): State<AppState>) -> Json<DashboardStats> {
     let stats = state.connection_log.stats().await;
     Json(stats)
+}
+
+pub async fn get_mitmproxy_status(
+    State(state): State<AppState>,
+) -> Json<netguard_mitm::MitmControllerStatus> {
+    Json(state.mitm_controller.status().await)
+}
+
+/// Translate a MitmError into an HTTP response. Only the short public message
+/// is sent to the client; the full detail (iptables command text, subprocess
+/// stderr, internal paths) is logged via tracing so operators can see it in
+/// daemon logs without leaking to every authenticated UI user.
+fn mitm_err_response(e: netguard_mitm::MitmError) -> (StatusCode, String) {
+    let status = match e {
+        netguard_mitm::MitmError::ToggleDisabled => StatusCode::FORBIDDEN,
+        netguard_mitm::MitmError::NotConfigured(_) => StatusCode::SERVICE_UNAVAILABLE,
+        netguard_mitm::MitmError::Iptables(_) | netguard_mitm::MitmError::Spawn(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    let public = e.public_message().to_string();
+    // Display impl now includes inner detail for ops visibility in logs,
+    // while the public message sent to the client stays sanitized.
+    tracing::warn!(error = %e, "mitmproxy toggle error");
+    (status, public)
+}
+
+pub async fn enable_mitmproxy(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<Json<netguard_mitm::MitmControllerStatus>, (StatusCode, String)> {
+    // Audit log: deliberate WARN level so every toggle shows up in journalctl
+    // by default. Includes caller addr so an operator can distinguish a user
+    // click from a compromised token being replayed from elsewhere.
+    tracing::warn!(
+        caller = %addr,
+        "mitmproxy/enable requested"
+    );
+    state
+        .mitm_controller
+        .enable_via_toggle()
+        .await
+        .map_err(mitm_err_response)?;
+    info!(caller = %addr, "mitmproxy enabled via API");
+    Ok(Json(state.mitm_controller.status().await))
+}
+
+pub async fn disable_mitmproxy(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<Json<netguard_mitm::MitmControllerStatus>, (StatusCode, String)> {
+    tracing::warn!(
+        caller = %addr,
+        "mitmproxy/disable requested"
+    );
+    state
+        .mitm_controller
+        .disable_via_toggle()
+        .await
+        .map_err(mitm_err_response)?;
+    info!(caller = %addr, "mitmproxy disabled via API");
+    Ok(Json(state.mitm_controller.status().await))
+}
+
+pub async fn download_mitm_ca(
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, String)> {
+    let status = state.mitm_controller.status().await;
+    if !status.ca_cert_installed {
+        // Don't leak the full confdir path in the public error body; the
+        // configured path is visible via GET /api/mitmproxy/status anyway,
+        // but a 404 with a generic message keeps this endpoint clean.
+        return Err((
+            StatusCode::NOT_FOUND,
+            "mitmproxy CA cert is not available; run deploy.sh first".into(),
+        ));
+    }
+    let bytes = tokio::fs::read(&status.ca_cert_path).await.map_err(|e| {
+        tracing::warn!(error = %e, path = %status.ca_cert_path, "CA cert read failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to read CA cert".into(),
+        )
+    })?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/x-pem-file"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"netguard-mitm-ca.pem\"",
+            ),
+            // Don't let a shared proxy or browser cache a trust root.
+            (header::CACHE_CONTROL, "no-store, max-age=0"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        bytes,
+    )
+        .into_response())
 }

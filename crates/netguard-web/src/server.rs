@@ -73,6 +73,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/prompts", get(api::list_prompts))
         .route("/prompts/{id}/respond", post(api::respond_prompt))
         .route("/stats", get(api::get_stats))
+        .route("/mitmproxy", get(api::get_mitmproxy_status))
+        .route("/mitmproxy/enable", post(api::enable_mitmproxy))
+        .route("/mitmproxy/disable", post(api::disable_mitmproxy))
+        .route("/mitmproxy/ca-cert", get(api::download_mitm_ca))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -190,6 +194,13 @@ pub async fn start_server(state: AppState, addr: &str, port: u16) -> Result<(), 
     tracing::info!("Web UI starting at http://{bind_addr}");
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+    // with_connect_info lets handlers extract the caller's SocketAddr via
+    // ConnectInfo<SocketAddr> — used for audit-logging security-sensitive
+    // endpoints (e.g. the mitmproxy enable/disable toggle).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

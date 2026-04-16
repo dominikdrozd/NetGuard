@@ -82,6 +82,9 @@ function handleEvent(msg: WsEvent) {
     case 'new_connection':
       useConnectionStore.getState().addConnection(msg.data);
       break;
+    case 'connection_enriched':
+      useConnectionStore.getState().enrichConnection(msg.data.id, msg.data.fields);
+      break;
     case 'prompt':
       usePromptStore.getState().addPrompt(msg.data);
       break;

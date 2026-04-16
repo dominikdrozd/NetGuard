@@ -28,6 +28,19 @@ export interface Connection {
   request_url?: string;
   payload_hex?: string;
   packet_size: number;
+  decrypted_request_headers?: string;
+  decrypted_request_body?: string;
+  decrypted_response_status?: number;
+  decrypted_response_headers?: string;
+  decrypted_response_body?: string;
+}
+
+export interface EnrichmentDelta {
+  decrypted_request_headers?: string;
+  decrypted_request_body?: string;
+  decrypted_response_status?: number;
+  decrypted_response_headers?: string;
+  decrypted_response_body?: string;
 }
 
 export interface Rule {
@@ -70,6 +83,7 @@ export interface DashboardStats {
 
 export type WsEvent =
   | { type: 'new_connection'; data: Connection }
+  | { type: 'connection_enriched'; data: { id: string; fields: EnrichmentDelta } }
   | { type: 'prompt'; data: PendingPrompt }
   | { type: 'prompt_resolved'; data: { prompt_id: string; verdict: Verdict } }
   | { type: 'rule_changed'; data: Rule }

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 netguard-core = { path = "../netguard-core" }
+netguard-mitm = { path = "../netguard-mitm" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { workspace = true }
 tower-http = { version = "0.6", features = ["cors", "fs"] }

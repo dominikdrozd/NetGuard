@@ -54,7 +54,11 @@ function AuthenticatedApp({ selectedConnection, setSelectedConnection }: {
           </Routes>
         </main>
         <PromptOverlay />
-        <PacketDetailModal connectionId={selectedConnection} onClose={() => setSelectedConnection(null)} />
+        <PacketDetailModal
+          connectionId={selectedConnection}
+          onClose={() => setSelectedConnection(null)}
+          onSelectConnection={setSelectedConnection}
+        />
       </div>
     </HashRouter>
   );

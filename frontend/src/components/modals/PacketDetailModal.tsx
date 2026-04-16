@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useConnectionStore } from '../../stores/connectionStore';
 import { ModalBackdrop } from '../common/ModalBackdrop';
 import { VerdictBadge, ProtocolBadge } from '../common/Badge';
-import { formatDateTime, formatSize, protocolStr } from '../../utils/format';
+import { formatDateTime, formatSize, formatTime, protocolStr, appName } from '../../utils/format';
 import { hexToAsciiLines } from '../../utils/hex';
 import { api } from '../../hooks/useApi';
 import type { CreateRuleRequest, Verdict, Direction, Protocol } from '../../types';
@@ -10,12 +10,19 @@ import type { CreateRuleRequest, Verdict, Direction, Protocol } from '../../type
 interface Props {
   connectionId: string | null;
   onClose: () => void;
+  onSelectConnection?: (id: string) => void;
 }
 
-export function PacketDetailModal({ connectionId, onClose }: Props) {
+export function PacketDetailModal({ connectionId, onClose, onSelectConnection }: Props) {
   const connections = useConnectionStore(s => s.connections);
   const c = connectionId ? connections.find(x => x.id === connectionId) : null;
   const [ruleCreated, setRuleCreated] = useState<'allow' | 'deny' | null>(null);
+
+  // Other connections from the same process (by exe_path), most recent first,
+  // excluding the currently-open one. Scoped to the in-memory connection list.
+  const sameAppHistory = c?.process?.exe_path
+    ? connections.filter(x => x.id !== c.id && x.process?.exe_path === c.process?.exe_path).slice(0, 50)
+    : [];
 
   const createRule = async (verdict: 'allow' | 'deny') => {
     if (!c) return;
@@ -75,6 +82,71 @@ export function PacketDetailModal({ connectionId, onClose }: Props) {
             <div className="pkt-label" style={{ marginBottom: 6 }}>Payload (hex + ASCII)</div>
             <pre className="hex-dump">{c.payload_hex ? hexToAsciiLines(c.payload_hex) : 'No payload data'}</pre>
           </div>
+
+          {(c.decrypted_request_headers || c.decrypted_request_body) && (
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div className="pkt-label" style={{ marginBottom: 6, fontWeight: 600 }}>Decrypted Request</div>
+              {c.decrypted_request_headers && (
+                <pre className="hex-dump" style={{ whiteSpace: 'pre-wrap' }}>{c.decrypted_request_headers}</pre>
+              )}
+              {c.decrypted_request_body && (
+                <>
+                  <div className="pkt-label" style={{ marginTop: 8, marginBottom: 6 }}>Body</div>
+                  <pre className="hex-dump" style={{ whiteSpace: 'pre-wrap' }}>{c.decrypted_request_body}</pre>
+                </>
+              )}
+            </div>
+          )}
+
+          {(c.decrypted_response_status || c.decrypted_response_headers || c.decrypted_response_body) && (
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div className="pkt-label" style={{ marginBottom: 6, fontWeight: 600 }}>
+                Decrypted Response{c.decrypted_response_status ? ` (${c.decrypted_response_status})` : ''}
+              </div>
+              {c.decrypted_response_headers && (
+                <pre className="hex-dump" style={{ whiteSpace: 'pre-wrap' }}>{c.decrypted_response_headers}</pre>
+              )}
+              {c.decrypted_response_body && (
+                <>
+                  <div className="pkt-label" style={{ marginTop: 8, marginBottom: 6 }}>Body</div>
+                  <pre className="hex-dump" style={{ whiteSpace: 'pre-wrap' }}>{c.decrypted_response_body}</pre>
+                </>
+              )}
+            </div>
+          )}
+
+          {sameAppHistory.length > 0 && (
+            <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+              <div className="pkt-label" style={{ marginBottom: 6, fontWeight: 600 }}>
+                Other requests from {appName(c.process)} ({sameAppHistory.length})
+              </div>
+              <div style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 4 }}>
+                {sameAppHistory.map(h => (
+                  <div
+                    key={h.id}
+                    onClick={() => onSelectConnection?.(h.id)}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '80px 1fr 80px',
+                      gap: 8,
+                      padding: '6px 10px',
+                      borderBottom: '1px solid var(--border)',
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      alignItems: 'center',
+                    }}
+                    className="clickable"
+                  >
+                    <span className="text-mono" style={{ color: 'var(--text-muted)' }}>{formatTime(h.timestamp)}</span>
+                    <span className="truncate text-mono">
+                      {h.request_url || (h.hostname ? `${h.hostname}:${h.dst_port}` : `${h.dst_ip}:${h.dst_port}`)}
+                    </span>
+                    <VerdictBadge verdict={h.verdict} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {ruleCreated ? (
             <div style={{ marginTop: 16, padding: '10px 14px', borderRadius: 6, background: ruleCreated === 'allow' ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)', border: `1px solid ${ruleCreated === 'allow' ? 'var(--green)' : 'var(--red)'}` }}>

@@ -5,6 +5,7 @@ members = [
     "crates/netguard-nfq",
     "crates/netguard-web",
     "crates/netguard-daemon",
+    "crates/netguard-mitm",
 ]
 
 [workspace.dependencies]

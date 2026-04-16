@@ -11,6 +11,7 @@ path = "src/main.rs"
 netguard-core = { path = "../netguard-core" }
 netguard-nfq = { path = "../netguard-nfq" }
 netguard-web = { path = "../netguard-web" }
+netguard-mitm = { path = "../netguard-mitm" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -183,6 +183,11 @@ pub fn run_nfqueue_loop(
                     request_url,
                     payload_hex,
                     packet_size: parsed.packet_size,
+                    decrypted_request_headers: None,
+                    decrypted_request_body: None,
+                    decrypted_response_status: None,
+                    decrypted_response_headers: None,
+                    decrypted_response_body: None,
                 };
 
                 // Evaluate rules synchronously (std::sync::RwLock -- no tokio dependency)
@@ -229,6 +234,17 @@ pub fn run_nfqueue_loop(
     }
 }
 
+/// Options for enabling transparent mitmproxy interception.
+/// `uid` is the NUMERIC UID of the mitmproxy subprocess user, resolved once
+/// at daemon startup via `netguard_core::config::resolve_system_user`. We
+/// refuse to use the username form in iptables because it would be silently
+/// misbehaving if the system's /etc/passwd changes (package reinstall,
+/// restored backup, UID recycling).
+pub struct MitmRedirect {
+    pub uid: u32,
+    pub port: u16,
+}
+
 /// Setup iptables rules for NFQUEUE interception.
 pub fn setup_iptables(
     queue_num: u16,
@@ -237,6 +253,7 @@ pub fn setup_iptables(
     skip_loopback: bool,
     skip_established: bool,
     fail_open: bool,
+    mitm: Option<MitmRedirect>,
 ) -> Result<(), NetGuardError> {
     cleanup_iptables().ok();
 
@@ -249,15 +266,29 @@ pub fn setup_iptables(
     }
 
     if outbound {
-        run_iptables(&["-N", "NETGUARD_OUT"])?;
+        // NETGUARD_OUT lives in the mangle table so it runs BEFORE nat OUTPUT.
+        // When mitmproxy is enabled, nat OUTPUT REDIRECTs tcp/80 and tcp/443 to 127.0.0.1:<mitm_port>;
+        // placing NFQUEUE in mangle lets us still see the ORIGINAL destination.
+        run_iptables(&["-t", "mangle", "-N", "NETGUARD_OUT"])?;
+        // When mitmproxy is enabled, let its own upstream (re-encrypted) traffic
+        // bypass NFQUEUE entirely so we don't process the same flow twice.
+        if let Some(ref m) = mitm {
+            let uid_str = m.uid.to_string();
+            run_iptables(&[
+                "-t", "mangle", "-A", "NETGUARD_OUT",
+                "-m", "owner", "--uid-owner", &uid_str,
+                "-j", "RETURN",
+            ])?;
+        }
         if skip_loopback {
-            run_iptables(&["-A", "NETGUARD_OUT", "-o", "lo", "-j", "ACCEPT"])?;
+            run_iptables(&["-t", "mangle", "-A", "NETGUARD_OUT", "-o", "lo", "-j", "ACCEPT"])?;
         }
         if skip_established {
             // Accept established traffic EXCEPT the first 10 packets per connection
             // This captures SYN + TLS handshake + initial data for payload inspection
             // while letting bulk data flow without userspace overhead
             let connbytes_works = run_iptables(&[
+                "-t", "mangle",
                 "-A", "NETGUARD_OUT",
                 "-m", "state", "--state", "ESTABLISHED,RELATED",
                 "-m", "connbytes", "--connbytes", "10:", "--connbytes-dir", "both", "--connbytes-mode", "packets",
@@ -266,13 +297,13 @@ pub fn setup_iptables(
             if !connbytes_works {
                 // Fallback: skip all established if connbytes module not available
                 tracing::warn!("connbytes module not available, falling back to skip all established");
-                run_iptables(&["-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+                run_iptables(&["-t", "mangle", "-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
             }
         }
-        let mut out_args = vec!["-A", "NETGUARD_OUT"];
+        let mut out_args = vec!["-t", "mangle", "-A", "NETGUARD_OUT"];
         out_args.extend_from_slice(&nfq_args);
         run_iptables(&out_args)?;
-        run_iptables(&["-A", "OUTPUT", "-j", "NETGUARD_OUT"])?;
+        run_iptables(&["-t", "mangle", "-A", "OUTPUT", "-j", "NETGUARD_OUT"])?;
     }
 
     // Always intercept inbound DNS responses for domain sniffing, even if intercept_inbound is off
@@ -308,24 +339,72 @@ pub fn setup_iptables(
         run_iptables(&["-A", "INPUT", "-j", "NETGUARD_IN"])?;
     }
 
+    // Transparent mitmproxy REDIRECT is deferred to setup_mitm_redirect() after
+    // the mitmdump subprocess is confirmed running. owner-match RETURN rule in
+    // NETGUARD_OUT above is already in place when mitm is enabled.
+
     tracing::info!(
-        "iptables rules configured (outbound={outbound}, inbound={inbound}, fail_open={fail_open})"
+        "iptables rules configured (outbound={outbound}, inbound={inbound}, fail_open={fail_open}, mitm={})",
+        mitm.is_some()
     );
+    Ok(())
+}
+
+/// Install the nat OUTPUT REDIRECT rules so tcp/80 and tcp/443 are steered to
+/// a local mitmproxy listener. Call this only after mitmdump is actually
+/// bound, otherwise outbound HTTP(S) breaks while the child is still starting.
+pub fn setup_mitm_redirect(uid: u32, port: u16) -> Result<(), NetGuardError> {
+    let port_str = port.to_string();
+    let uid_str = uid.to_string();
+    // Tolerate the chain already existing (e.g. after a crash that skipped cleanup)
+    let _ = run_iptables(&["-t", "nat", "-N", "NETGUARD_REDIR"]);
+    let _ = run_iptables(&["-t", "nat", "-F", "NETGUARD_REDIR"]);
+    run_iptables(&[
+        "-t", "nat", "-A", "NETGUARD_REDIR",
+        "-m", "owner", "--uid-owner", &uid_str,
+        "-j", "RETURN",
+    ])?;
+    run_iptables(&[
+        "-t", "nat", "-A", "NETGUARD_REDIR",
+        "-p", "tcp", "--dport", "80",
+        "-j", "REDIRECT", "--to-ports", &port_str,
+    ])?;
+    run_iptables(&[
+        "-t", "nat", "-A", "NETGUARD_REDIR",
+        "-p", "tcp", "--dport", "443",
+        "-j", "REDIRECT", "--to-ports", &port_str,
+    ])?;
+    // Idempotent insert (-D first ignored on first run)
+    let _ = run_iptables(&["-t", "nat", "-D", "OUTPUT", "-j", "NETGUARD_REDIR"]);
+    run_iptables(&["-t", "nat", "-I", "OUTPUT", "1", "-j", "NETGUARD_REDIR"])?;
+    tracing::info!("mitmproxy REDIRECT active: tcp/80,443 -> 127.0.0.1:{port}");
     Ok(())
 }
 
 /// Remove all NETGUARD iptables chains and rules.
 pub fn cleanup_iptables() -> Result<(), NetGuardError> {
+    // NETGUARD_OUT now lives in mangle table
+    let _ = run_iptables(&["-t", "mangle", "-D", "OUTPUT", "-j", "NETGUARD_OUT"]);
+    let _ = run_iptables(&["-t", "mangle", "-F", "NETGUARD_OUT"]);
+    let _ = run_iptables(&["-t", "mangle", "-X", "NETGUARD_OUT"]);
+    // Legacy: previous versions put NETGUARD_OUT in filter table. Clean that up too
+    // so upgrades don't leave stale rules behind.
     let _ = run_iptables(&["-D", "OUTPUT", "-j", "NETGUARD_OUT"]);
-    let _ = run_iptables(&["-D", "INPUT", "-j", "NETGUARD_IN"]);
     let _ = run_iptables(&["-F", "NETGUARD_OUT"]);
     let _ = run_iptables(&["-X", "NETGUARD_OUT"]);
+
+    let _ = run_iptables(&["-D", "INPUT", "-j", "NETGUARD_IN"]);
     let _ = run_iptables(&["-F", "NETGUARD_IN"]);
     let _ = run_iptables(&["-X", "NETGUARD_IN"]);
     // DNS sniffing chain
     let _ = run_iptables(&["-D", "INPUT", "-p", "udp", "--sport", "53", "-j", "NETGUARD_DNS"]);
     let _ = run_iptables(&["-F", "NETGUARD_DNS"]);
     let _ = run_iptables(&["-X", "NETGUARD_DNS"]);
+
+    // nat NETGUARD_REDIR chain (mitmproxy REDIRECT) — cleaned up even if mitm was disabled
+    let _ = run_iptables(&["-t", "nat", "-D", "OUTPUT", "-j", "NETGUARD_REDIR"]);
+    let _ = run_iptables(&["-t", "nat", "-F", "NETGUARD_REDIR"]);
+    let _ = run_iptables(&["-t", "nat", "-X", "NETGUARD_REDIR"]);
 
     tracing::info!("iptables rules cleaned up");
     Ok(())

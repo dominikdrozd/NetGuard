@@ -9,8 +9,9 @@ A per-process network firewall for Linux, similar to [Little Snitch](https://obd
 - **One-click allow/block** -- click any connection to view details, then allow or block that app+destination with one click
 - **Interactive prompts** -- get notified when an unknown application tries to connect and decide to allow or block
 - **Domain resolution** -- automatically resolves destination IPs to domain names via reverse DNS and DNS response sniffing
-- **Packet inspection** -- click any connection to view full details including a hex+ASCII payload dump
-- **Connection logging** -- searchable history with CSV export
+- **Packet inspection** -- click any connection to view full details including hex+ASCII payload, plus a per-process history of other recent requests from the same app
+- **Optional HTTPS decryption** -- opt-in transparent mitmproxy integration surfaces decrypted request/response headers and bodies in the detail view. Toggle on/off from the sidebar at runtime; download the CA cert and open per-browser install instructions straight from the panel
+- **Connection logging** -- searchable history with CSV export and on-disk JSONL persistence (chmod 600)
 - **Web dashboard** -- React + TypeScript SPA served at `http://127.0.0.1:3031`
 - **Fail-closed by default** -- blocks all traffic if the daemon stops (configurable)
 
@@ -59,6 +60,7 @@ A per-process network firewall for Linux, similar to [Little Snitch](https://obd
 | libnfnetlink | `libnfnetlink-dev` | `libnfnetlink-devel` | `libnfnetlink` |
 | libmnl | `libmnl-dev` | `libmnl-devel` | `libmnl` |
 | iptables | `iptables` | `iptables` | `iptables` |
+| mitmproxy *(optional, for HTTPS decrypt)* | `mitmproxy` | `mitmproxy` | `mitmproxy` |
 
 ### Rust Toolchain
 
@@ -235,6 +237,76 @@ cache_refresh_ms = 2000        # Process-to-socket cache refresh interval
 | `intercept_inbound` | `false` | Enable to also monitor incoming connections. |
 | `listen_addr` | `127.0.0.1` | Change to `0.0.0.0` to access the UI from other machines (not recommended). |
 
+## Decrypting HTTPS content
+
+NetGuard ships with an optional transparent mitmproxy integration. When enabled, outbound `tcp/80` and `tcp/443` traffic is terminated locally, decrypted, and re-encrypted to the real server. The decrypted request and response (method, URL, headers, bodies) appears in the packet detail modal and is appended to the connection log on disk.
+
+**This is opt-in and invasive. Read this whole section before enabling it.**
+
+### What breaks
+
+- **Cert-pinned apps fail.** Browsers for HSTS-preloaded sites, Signal, WhatsApp, most banking/OS apps pin their roots. These connections will fail until you bypass them, and this is fundamental to how TLS MITM works — not a bug.
+- **Browsers won't decrypt until their cert store trusts the CA.** Firefox and Chromium use their own NSS stores, separate from the system. See below.
+- **Performance cost.** Every tcp/80 and tcp/443 flow terminates locally and re-opens upstream. Expect +1–5 ms latency and ~2× RAM per flow.
+- **Decrypted bodies appear in plaintext in `/var/log/netguard/connections.log`.** Passwords, tokens, and PII included. The file is `chmod 600` (root-only). Use `persist_bodies = false` in config if you want only headers and status on disk. Consider `logrotate` with `shred` for the rotated files.
+
+### Prerequisites (one-time)
+
+Run `deploy.sh` once — it installs `mitmproxy`, creates the `netguard-mitm` system user, and generates the CA at `/var/lib/netguard/mitm/mitmproxy-ca-cert.pem` (not yet trusted by anything).
+
+### Turning it on/off at runtime
+
+There's a **HTTPS Decrypt** toggle at the bottom of the sidebar in the web UI.
+
+- **ON** spawns the mitmdump subprocess, installs the nat OUTPUT REDIRECT rules, and starts streaming decrypted flows into the connection log. No daemon restart needed.
+- **OFF** removes the REDIRECT rules and kills mitmdump. Again, no restart.
+
+The initial state when the daemon starts comes from `mitmproxy.enabled` in `/etc/netguard/netguard.toml`; the runtime toggle overrides it for the current session but does not rewrite the config file. Set the config flag to `true` if you want mitmproxy to auto-start on every boot.
+
+### Trusting the CA
+
+The toggle spawns the proxy, but clients will reject its cert until the CA is trusted. The sidebar panel has a **Download CA** button and a **How to install** helper that shows per-browser steps plus copy-to-clipboard commands.
+
+**System trust (cURL, Go/Python apps, anything using `/etc/ssl/certs`):**
+
+```bash
+# Download the CA from the UI, then:
+sudo cp ~/Downloads/netguard-mitm-ca.pem /usr/local/share/ca-certificates/netguard-mitm.crt
+sudo update-ca-certificates
+```
+
+**Firefox:** Preferences → Privacy & Security → Certificates → View Certificates → Authorities → Import → pick the downloaded PEM → tick "Trust this CA to identify websites". (Paste `about:preferences#privacy` in a new tab to jump there; the UI has a copy button.)
+
+**Chromium / Chrome:** `chrome://settings/certificates` → Authorities → Import → pick the PEM → tick "Trust this certificate for identifying websites".
+
+Until the CA is trusted in a given client, that client will show TLS errors for every HTTPS site — that's mitmproxy introducing itself with a cert the client has never seen, which is expected.
+
+> Browsers explicitly forbid scripted cert installation — no UI button can do it for you. The download + copy-clipboard workflow is the closest you can get without manual clicks.
+
+### Test it
+
+With the toggle ON and the CA trusted system-wide:
+
+```bash
+curl https://httpbin.org/get
+```
+
+Open the connection in the web UI — you should see "Decrypted Request" and "Decrypted Response" sections at the bottom of the detail modal with headers, status, and the JSON body.
+
+### Turning it off permanently
+
+1. Flip the sidebar toggle to OFF (removes REDIRECT rules immediately).
+2. Untrust the CA in any client you installed it into (system + each browser):
+   ```bash
+   sudo rm /usr/local/share/ca-certificates/netguard-mitm.crt
+   sudo update-ca-certificates --fresh
+   ```
+3. Set `mitmproxy.enabled = false` in `/etc/netguard/netguard.toml` so future daemon restarts don't re-enable it.
+
+### How it works
+
+NFQUEUE is attached to `mangle OUTPUT` instead of `filter OUTPUT`, so it sees the real destination *before* `nat OUTPUT`'s REDIRECT rewrites it. A `NETGUARD_REDIR` chain in the nat table rewrites tcp/80 and tcp/443 destinations to mitmproxy's local listener. An owner-match rule (`--uid-owner netguard-mitm`) makes mitmproxy's own upstream re-encrypted traffic bypass both REDIRECT and NFQUEUE, preventing a loop. An embedded Python addon in mitmproxy emits one JSON line per completed flow over a Unix socket at `/run/netguard/mitm.sock`, which the daemon reads and merges into the corresponding connection record by matching the client ephemeral port. The merge fires asynchronously after the flow completes, surfacing as a `connection_enriched` WebSocket event so the detail modal updates in place.
+
 ## Web Dashboard
 
 ### Dashboard
@@ -246,6 +318,8 @@ Filterable table of all connections showing time, application, domain, destinati
 - Resolved domain name
 - Source and destination addresses
 - Hex + ASCII payload dump
+- **Decrypted request/response** (when HTTPS Decrypt is on) -- method, URL, headers, and body for plaintext HTTP and decrypted HTTPS
+- **Other requests from this app** -- a scrollable clickable list of the 50 most recent connections from the same process (same `exe_path`). Click any entry to jump the modal to that connection's details without closing it
 - **Allow/Block buttons** -- create a firewall rule for this app+destination with one click
 
 The table pauses live updates while your mouse is over it to prevent rows from shifting.
@@ -347,8 +421,9 @@ netguard/
 │       │   └── modals/           # PacketDetailModal
 │       └── pages/LoginPage.tsx
 └── crates/
-    ├── netguard-core/            # Data types, rule engine, config
-    ├── netguard-nfq/             # NFQUEUE, packet parsing, /proc, DNS cache
+    ├── netguard-core/            # Data types, rule engine, config, connection log (in-memory + JSONL)
+    ├── netguard-nfq/             # NFQUEUE, packet parsing, /proc, DNS cache, iptables setup
+    ├── netguard-mitm/            # mitmproxy bridge, flow cache, runtime controller, embedded addon.py
     ├── netguard-web/             # Axum server, REST API, WebSocket
     │   └── static/               # Build output (generated by Vite)
     └── netguard-daemon/          # Binary entry point
@@ -363,11 +438,13 @@ The daemon needs `CAP_NET_ADMIN` capability for NFQUEUE and iptables. Run with `
 With `fail_open = false` (default), stopping the daemon blocks traffic because the NFQUEUE rules remain. Fix:
 ```bash
 sudo netguard --cleanup
-# or manually:
-sudo iptables -D OUTPUT -j NETGUARD_OUT
+# or manually (NETGUARD_OUT now lives in the mangle table; NETGUARD_REDIR in nat):
+sudo iptables -t mangle -D OUTPUT -j NETGUARD_OUT
+sudo iptables -t mangle -F NETGUARD_OUT && sudo iptables -t mangle -X NETGUARD_OUT
 sudo iptables -D INPUT -j NETGUARD_IN
-sudo iptables -F NETGUARD_OUT && sudo iptables -X NETGUARD_OUT
 sudo iptables -F NETGUARD_IN && sudo iptables -X NETGUARD_IN
+sudo iptables -t nat -D OUTPUT -j NETGUARD_REDIR
+sudo iptables -t nat -F NETGUARD_REDIR && sudo iptables -t nat -X NETGUARD_REDIR
 ```
 
 ### Everything is being blocked

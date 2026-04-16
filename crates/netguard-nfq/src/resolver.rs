@@ -2,6 +2,7 @@ use crate::dns::DnsCache;
 use crate::queue::PacketEvent;
 use netguard_core::connection_log::ConnectionLog;
 use netguard_core::models::*;
+use netguard_mitm::MitmFlowCache;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -14,6 +15,8 @@ pub async fn run_event_processor(
     event_tx: broadcast::Sender<WsEvent>,
     connection_log: Arc<ConnectionLog>,
     dns_cache: Arc<DnsCache>,
+    mitm_cache: Option<Arc<MitmFlowCache>>,
+    mitm_idle_timeout_secs: u64,
 ) {
     while let Some(event) = event_rx.recv().await {
         let mut conn = event.connection;
@@ -28,11 +31,95 @@ pub async fn run_event_processor(
         // Broadcast to WebSocket clients
         let _ = event_tx.send(WsEvent::NewConnection(conn.clone()));
 
+        // If mitmproxy is enabled and this looks like an HTTP/HTTPS connection,
+        // poll the flow cache for a matching decrypted flow and emit an
+        // ConnectionEnriched update when it lands. The flow arrives AFTER the
+        // NFQUEUE packet event, so this is a deliberate late-merge.
+        if let Some(cache) = mitm_cache.as_ref() {
+            if is_http_ish(&conn) {
+                spawn_enrichment_task(
+                    cache.clone(),
+                    event_tx.clone(),
+                    connection_log.clone(),
+                    conn.clone(),
+                    mitm_idle_timeout_secs,
+                );
+            }
+        }
+
         // Log
         connection_log.push(conn).await;
     }
 
     tracing::info!("Event channel closed, event processor shutting down");
+}
+
+fn is_http_ish(conn: &Connection) -> bool {
+    matches!(conn.dst_port, 80 | 443 | 8080 | 8443)
+}
+
+fn spawn_enrichment_task(
+    cache: Arc<MitmFlowCache>,
+    event_tx: broadcast::Sender<WsEvent>,
+    connection_log: Arc<ConnectionLog>,
+    conn: Connection,
+    idle_timeout_secs: u64,
+) {
+    tokio::spawn(async move {
+        // Full 4-tuple key — see netguard_mitm::FlowKey docstring for why this
+        // is mandatory rather than just (src_ip, src_port).
+        let key = (conn.src_ip, conn.src_port, conn.dst_ip, conn.dst_port);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(idle_timeout_secs.max(1));
+        loop {
+            if let Some(flow) = cache.take(&key).await {
+                // Defensive cross-check: even with a full-tuple key, reject
+                // the enrichment if the server IP/port recorded by mitmproxy
+                // doesn't match this connection's destination. A mismatch
+                // implies cache key collision or a forged flow record.
+                let server_ip_ok = flow
+                    .server_ip
+                    .parse::<IpAddr>()
+                    .map(|ip| ip == conn.dst_ip)
+                    .unwrap_or(false);
+                if !server_ip_ok || flow.server_port != conn.dst_port {
+                    tracing::warn!(
+                        "dropping mitm flow with mismatched server addr: expected {}:{}, got {}:{}",
+                        conn.dst_ip,
+                        conn.dst_port,
+                        flow.server_ip,
+                        flow.server_port
+                    );
+                    return;
+                }
+                let delta = EnrichmentDelta {
+                    decrypted_request_headers: Some(flow.request_headers),
+                    decrypted_request_body: if flow.request_body.is_empty() {
+                        None
+                    } else {
+                        Some(flow.request_body)
+                    },
+                    decrypted_response_status: Some(flow.status_code),
+                    decrypted_response_headers: Some(flow.response_headers),
+                    decrypted_response_body: if flow.response_body.is_empty() {
+                        None
+                    } else {
+                        Some(flow.response_body)
+                    },
+                };
+                let _ = event_tx.send(WsEvent::ConnectionEnriched {
+                    id: conn.id,
+                    fields: delta.clone(),
+                });
+                connection_log.enrich(conn.id, delta).await;
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
 }
 
 /// Perform an async reverse DNS lookup using tokio's DNS resolver.
