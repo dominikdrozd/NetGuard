@@ -7,13 +7,57 @@ use chrono::Utc;
 use netguard_core::errors::NetGuardError;
 use netguard_core::models::*;
 use netguard_core::rule_engine::RuleEngine;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use uuid::Uuid;
 
 /// Raw packet info sent to the async resolver for logging/prompting.
+/// Each unique flow (5-tuple) produces exactly one `New` event followed by
+/// zero or more `Enrich` events as later packets bring in TLS SNI, HTTP
+/// request info, or payload that wasn't visible at SYN time.
 #[derive(Debug)]
-pub struct PacketEvent {
-    pub connection: Connection,
+pub enum PacketEvent {
+    New(Connection),
+    Enrich { id: Uuid, delta: EnrichmentDelta },
+}
+
+/// Key used to dedupe packet events per flow. UDP flows use src+dst too, so
+/// DNS responses (which we also NFQUEUE for sniffing) don't collide.
+type FlowKey5 = (IpAddr, u16, IpAddr, u16, Protocol);
+
+/// Per-flow tracking record kept in the NFQUEUE thread's local HashMap.
+/// Fields marked `has_*` are set once the corresponding metadata has been
+/// emitted — so we never re-send the same value twice.
+struct TrackedFlow {
+    uuid: Uuid,
+    has_hostname: bool,
+    has_http_method: bool,
+    has_request_url: bool,
+    has_payload: bool,
+    last_seen: Instant,
+}
+
+/// Hard cap on tracked flows to bound memory if something goes wrong (a flood
+/// of unique 5-tuples). When we hit this we evict by age first, then
+/// wholesale clear if still oversized.
+const MAX_TRACKED_FLOWS: usize = 20_000;
+const TRACKED_FLOW_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn evict_tracked(seen: &mut HashMap<FlowKey5, TrackedFlow>) {
+    if seen.len() <= MAX_TRACKED_FLOWS {
+        return;
+    }
+    let cutoff = Instant::now() - TRACKED_FLOW_TTL;
+    seen.retain(|_, tc| tc.last_seen > cutoff);
+    if seen.len() > MAX_TRACKED_FLOWS {
+        // Still over cap even after TTL evict — nuke it. Losing the dedup
+        // map briefly is fine; at worst we emit a duplicate NewConnection
+        // event for flows currently in flight.
+        tracing::warn!("tracked-flow map exceeded cap, clearing");
+        seen.clear();
+    }
 }
 
 /// Run the NFQUEUE receive loop on a dedicated OS thread.
@@ -42,6 +86,11 @@ pub fn run_nfqueue_loop(
 
     let my_pid = std::process::id();
     let mut consecutive_errors: u32 = 0;
+    // Dedupe map: one UUID per 5-tuple. First packet of each flow emits
+    // PacketEvent::New; subsequent packets of the same flow only emit
+    // PacketEvent::Enrich when they carry previously-unseen info (SNI, HTTP
+    // request, non-empty payload). Reset wholesale if we blow the cap.
+    let mut tracked_flows: HashMap<FlowKey5, TrackedFlow> = HashMap::new();
 
     loop {
         match queue.recv() {
@@ -165,9 +214,44 @@ pub fn run_nfqueue_loop(
                     None
                 };
 
-                // Build connection
+                // Dedupe by 5-tuple. First packet of a flow -> new UUID +
+                // full Connection event. Subsequent packets -> reuse UUID,
+                // only send an Enrich event carrying fields that weren't
+                // present on earlier packets.
+                let flow_key: FlowKey5 = (
+                    parsed.src_ip,
+                    parsed.src_port,
+                    parsed.dst_ip,
+                    parsed.dst_port,
+                    parsed.protocol,
+                );
+                evict_tracked(&mut tracked_flows);
+                let (is_new_flow, flow_uuid) = match tracked_flows.get_mut(&flow_key) {
+                    Some(tc) => {
+                        tc.last_seen = Instant::now();
+                        (false, tc.uuid)
+                    }
+                    None => {
+                        let uuid = Uuid::new_v4();
+                        tracked_flows.insert(
+                            flow_key,
+                            TrackedFlow {
+                                uuid,
+                                has_hostname: hostname.is_some(),
+                                has_http_method: http_method.is_some(),
+                                has_request_url: request_url.is_some(),
+                                has_payload: payload_hex.is_some(),
+                                last_seen: Instant::now(),
+                            },
+                        );
+                        (true, uuid)
+                    }
+                };
+
+                // Build connection (used for rule evaluation on every packet —
+                // rules may match on later info that wasn't in the SYN).
                 let mut conn = Connection {
-                    id: Uuid::new_v4(),
+                    id: flow_uuid,
                     timestamp: Utc::now(),
                     protocol: parsed.protocol,
                     src_ip: parsed.src_ip,
@@ -178,10 +262,10 @@ pub fn run_nfqueue_loop(
                     verdict: Verdict::Pending,
                     rule_id: None,
                     direction,
-                    hostname,
-                    http_method,
-                    request_url,
-                    payload_hex,
+                    hostname: hostname.clone(),
+                    http_method: http_method.clone(),
+                    request_url: request_url.clone(),
+                    payload_hex: payload_hex.clone(),
                     packet_size: parsed.packet_size,
                     decrypted_request_headers: None,
                     decrypted_request_body: None,
@@ -216,8 +300,50 @@ pub fn run_nfqueue_loop(
                     continue;
                 }
 
-                // Send to async side for logging/UI (non-blocking, drop if full)
-                let _ = event_tx.send(PacketEvent { connection: conn });
+                // Send to async side for logging/UI.
+                if is_new_flow {
+                    let _ = event_tx.send(PacketEvent::New(conn));
+                } else {
+                    // Only emit an enrichment if this packet brings info the
+                    // original NewConnection event didn't have.
+                    let tc = tracked_flows.get_mut(&flow_key).expect("just inserted");
+                    let mut delta = EnrichmentDelta::default();
+                    let mut has_any = false;
+                    if !tc.has_hostname {
+                        if let Some(h) = hostname {
+                            delta.hostname = Some(h);
+                            tc.has_hostname = true;
+                            has_any = true;
+                        }
+                    }
+                    if !tc.has_http_method {
+                        if let Some(m) = http_method {
+                            delta.http_method = Some(m);
+                            tc.has_http_method = true;
+                            has_any = true;
+                        }
+                    }
+                    if !tc.has_request_url {
+                        if let Some(u) = request_url {
+                            delta.request_url = Some(u);
+                            tc.has_request_url = true;
+                            has_any = true;
+                        }
+                    }
+                    if !tc.has_payload {
+                        if let Some(p) = payload_hex {
+                            delta.payload_hex = Some(p);
+                            tc.has_payload = true;
+                            has_any = true;
+                        }
+                    }
+                    if has_any {
+                        let _ = event_tx.send(PacketEvent::Enrich {
+                            id: flow_uuid,
+                            delta,
+                        });
+                    }
+                }
             }
             Err(e) => {
                 consecutive_errors += 1;

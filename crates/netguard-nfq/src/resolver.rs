@@ -19,36 +19,49 @@ pub async fn run_event_processor(
     mitm_idle_timeout_secs: u64,
 ) {
     while let Some(event) = event_rx.recv().await {
-        let mut conn = event.connection;
+        match event {
+            PacketEvent::New(mut conn) => {
+                // Resolve hostname from DNS cache only (no active lookups to avoid feedback loops)
+                if conn.hostname.is_none() {
+                    if let Some(domain) = dns_cache.lookup(&conn.dst_ip) {
+                        conn.hostname = Some(domain);
+                    }
+                }
 
-        // Resolve hostname from DNS cache only (no active lookups to avoid feedback loops)
-        if conn.hostname.is_none() {
-            if let Some(domain) = dns_cache.lookup(&conn.dst_ip) {
-                conn.hostname = Some(domain);
+                // Broadcast to WebSocket clients
+                let _ = event_tx.send(WsEvent::NewConnection(conn.clone()));
+
+                // If mitmproxy is enabled and this looks like an HTTP/HTTPS connection,
+                // poll the flow cache for a matching decrypted flow and emit a
+                // ConnectionEnriched update when it lands. The flow arrives AFTER
+                // the NFQUEUE packet event, so this is a deliberate late-merge.
+                if let Some(cache) = mitm_cache.as_ref() {
+                    if is_http_ish(&conn) {
+                        spawn_enrichment_task(
+                            cache.clone(),
+                            event_tx.clone(),
+                            connection_log.clone(),
+                            conn.clone(),
+                            mitm_idle_timeout_secs,
+                        );
+                    }
+                }
+
+                // Log
+                connection_log.push(conn).await;
+            }
+            PacketEvent::Enrich { id, delta } => {
+                // Late-arriving info for a flow we already emitted
+                // (e.g. TLS SNI from the 3rd packet of a TCP handshake
+                // whose SYN triggered the initial NewConnection).
+                // Dedup means one row per flow — this updates it in place.
+                let _ = event_tx.send(WsEvent::ConnectionEnriched {
+                    id,
+                    fields: delta.clone(),
+                });
+                connection_log.enrich(id, delta).await;
             }
         }
-
-        // Broadcast to WebSocket clients
-        let _ = event_tx.send(WsEvent::NewConnection(conn.clone()));
-
-        // If mitmproxy is enabled and this looks like an HTTP/HTTPS connection,
-        // poll the flow cache for a matching decrypted flow and emit an
-        // ConnectionEnriched update when it lands. The flow arrives AFTER the
-        // NFQUEUE packet event, so this is a deliberate late-merge.
-        if let Some(cache) = mitm_cache.as_ref() {
-            if is_http_ish(&conn) {
-                spawn_enrichment_task(
-                    cache.clone(),
-                    event_tx.clone(),
-                    connection_log.clone(),
-                    conn.clone(),
-                    mitm_idle_timeout_secs,
-                );
-            }
-        }
-
-        // Log
-        connection_log.push(conn).await;
     }
 
     tracing::info!("Event channel closed, event processor shutting down");
@@ -120,6 +133,7 @@ fn spawn_enrichment_task(
                         Some(flow.method)
                     },
                     hostname: hostname_from_url,
+                    payload_hex: None,
                     decrypted_request_headers: Some(flow.request_headers),
                     decrypted_request_body: if flow.request_body.is_empty() {
                         None

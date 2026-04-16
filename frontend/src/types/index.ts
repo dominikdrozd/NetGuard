@@ -39,6 +39,7 @@ export interface EnrichmentDelta {
   request_url?: string;
   http_method?: string;
   hostname?: string;
+  payload_hex?: string;
   decrypted_request_headers?: string;
   decrypted_request_body?: string;
   decrypted_response_status?: number;

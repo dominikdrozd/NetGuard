@@ -96,6 +96,10 @@ pub struct EnrichmentDelta {
     pub http_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// Late-arriving payload (e.g. TLS ClientHello from packet 3 of a flow
+    /// whose NewConnection event was emitted at SYN with an empty payload).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decrypted_request_headers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

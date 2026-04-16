@@ -165,6 +165,7 @@ impl ConnectionLog {
                     request_url: delta.request_url.clone(),
                     http_method: delta.http_method.clone(),
                     hostname: delta.hostname.clone(),
+                    payload_hex: delta.payload_hex.clone(),
                     decrypted_request_headers: delta.decrypted_request_headers.clone(),
                     decrypted_request_body: None,
                     decrypted_response_status: delta.decrypted_response_status,
@@ -186,6 +187,9 @@ impl ConnectionLog {
         }
         if let Some(host) = delta.hostname {
             conn.hostname = Some(host);
+        }
+        if delta.payload_hex.is_some() {
+            conn.payload_hex = delta.payload_hex;
         }
         if delta.decrypted_request_headers.is_some() {
             conn.decrypted_request_headers = delta.decrypted_request_headers;
