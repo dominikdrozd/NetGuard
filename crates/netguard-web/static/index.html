@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetGuard - Application Firewall</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div class="app">
+        <nav class="sidebar">
+            <div class="sidebar-logo">
+                <h1>NetGuard</h1>
+                <div class="subtitle">Application Firewall</div>
+            </div>
+            <a class="nav-item active" data-page="dashboard">
+                <span class="nav-icon">&#9673;</span> Dashboard
+            </a>
+            <a class="nav-item" data-page="connections">
+                <span class="nav-icon">&#8644;</span> Connections
+            </a>
+            <a class="nav-item" data-page="rules">
+                <span class="nav-icon">&#9881;</span> Rules
+            </a>
+            <a class="nav-item" data-page="logs">
+                <span class="nav-icon">&#9776;</span> Logs
+            </a>
+            <div style="flex:1"></div>
+            <div class="nav-item" style="cursor:default">
+                <span class="status-dot" id="ws-status"></span>
+                <span id="ws-status-text">Connecting...</span>
+            </div>
+        </nav>
+
+        <main class="main">
+            <!-- Dashboard -->
+            <div id="page-dashboard" class="page">
+                <div class="stats-grid" id="stats-grid"></div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:16px;">
+                    <div class="card">
+                        <div class="card-header"><h2>Live Connections</h2></div>
+                        <div class="card-body" id="live-stream"></div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header"><h2>Top Applications</h2></div>
+                        <div class="card-body p-16" id="top-apps"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Connections -->
+            <div id="page-connections" class="page hidden">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>All Connections</h2>
+                        <div class="filters">
+                            <input type="text" id="conn-filter-app" placeholder="Filter by app...">
+                            <select id="conn-filter-verdict">
+                                <option value="">All verdicts</option>
+                                <option value="allow">Allowed</option>
+                                <option value="deny">Denied</option>
+                            </select>
+                            <select id="conn-filter-proto">
+                                <option value="">All protocols</option>
+                                <option value="tcp">TCP</option>
+                                <option value="udp">UDP</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="card-body-full">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Application</th>
+                                    <th>Domain</th>
+                                    <th>Destination</th>
+                                    <th>Port</th>
+                                    <th>Protocol</th>
+                                    <th>Size</th>
+                                    <th>Verdict</th>
+                                </tr>
+                            </thead>
+                            <tbody id="connections-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div style="text-align:center; padding:12px;">
+                    <button class="btn" id="load-more-connections">Load More</button>
+                </div>
+            </div>
+
+            <!-- Rules -->
+            <div id="page-rules" class="page hidden">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Firewall Rules</h2>
+                        <button class="btn btn-primary" id="add-rule-btn">+ Add Rule</button>
+                    </div>
+                    <div class="card-body-full">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Enabled</th>
+                                    <th>Application</th>
+                                    <th>Destination</th>
+                                    <th>Port</th>
+                                    <th>Protocol</th>
+                                    <th>Direction</th>
+                                    <th>Verdict</th>
+                                    <th>Hits</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="rules-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div id="page-logs" class="page hidden">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Connection History</h2>
+                        <div class="filters">
+                            <input type="text" id="log-search" placeholder="Search...">
+                            <button class="btn" id="export-csv">Export CSV</button>
+                        </div>
+                    </div>
+                    <div class="card-body-full">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Application</th>
+                                    <th>Source</th>
+                                    <th>Destination</th>
+                                    <th>Protocol</th>
+                                    <th>Verdict</th>
+                                    <th>Rule</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logs-table"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Prompt overlay -->
+        <div class="prompt-overlay" id="prompt-overlay"></div>
+
+        <!-- Add Rule Modal -->
+        <div class="modal-backdrop hidden" id="rule-modal">
+            <div class="modal">
+                <h2 id="rule-modal-title">Add Rule</h2>
+                <div class="form-group">
+                    <label>Application Path (e.g. /usr/bin/curl or * for all)</label>
+                    <input type="text" id="rule-app-path" placeholder="/usr/bin/curl">
+                </div>
+                <div class="form-group">
+                    <label>Remote Host (IP, CIDR, or hostname pattern - leave empty for any)</label>
+                    <input type="text" id="rule-remote-host" placeholder="*.example.com">
+                </div>
+                <div class="form-group">
+                    <label>Remote Port (leave empty for any)</label>
+                    <input type="number" id="rule-remote-port" placeholder="443">
+                </div>
+                <div class="form-group">
+                    <label>Protocol</label>
+                    <select id="rule-protocol">
+                        <option value="">Any</option>
+                        <option value="tcp">TCP</option>
+                        <option value="udp">UDP</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Direction</label>
+                    <select id="rule-direction">
+                        <option value="">Both</option>
+                        <option value="outbound">Outbound</option>
+                        <option value="inbound">Inbound</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Verdict</label>
+                    <select id="rule-verdict">
+                        <option value="allow">Allow</option>
+                        <option value="deny">Deny</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Note (optional)</label>
+                    <input type="text" id="rule-note" placeholder="Description...">
+                </div>
+                <div class="form-actions">
+                    <button class="btn" id="rule-modal-cancel">Cancel</button>
+                    <button class="btn btn-primary" id="rule-modal-save">Save Rule</button>
+                </div>
+            </div>
+        </div>
+        <!-- Packet Detail Modal -->
+        <div class="modal-backdrop hidden" id="packet-modal">
+            <div class="modal" style="width:640px">
+                <h2>Connection Detail</h2>
+                <div id="packet-detail"></div>
+                <div class="form-actions">
+                    <button class="btn" id="packet-modal-close">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="/app.js"></script>
+</body>
+</html>

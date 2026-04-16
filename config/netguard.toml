@@ -1,0 +1,36 @@
+[daemon]
+queue_num = 0
+default_verdict = "deny"
+prompt_timeout = 15
+log_level = "info"
+pid_file = "/var/run/netguard.pid"
+
+[web]
+listen_addr = "127.0.0.1"
+listen_port = 3031
+# Path to API authentication token file (auto-generated on first run)
+auth_token_file = "/etc/netguard/api_token"
+
+[rules]
+rules_file = "/etc/netguard/rules.json"
+
+[logging]
+log_file = "/var/log/netguard/connections.log"
+max_memory_entries = 10000
+
+[network]
+intercept_outbound = true
+intercept_inbound = false
+skip_loopback = true
+skip_established = true
+# If true, traffic flows normally when daemon is not running (--queue-bypass).
+# If false (default), traffic is BLOCKED when daemon is not running (fail-closed).
+# Set to true only if availability is more important than security.
+fail_open = false
+whitelist = [
+    "/usr/lib/systemd/systemd-resolved",
+    "/usr/lib/systemd/systemd-timesyncd",
+]
+
+[proc]
+cache_refresh_ms = 2000

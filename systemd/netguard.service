@@ -1,0 +1,20 @@
+[Unit]
+Description=NetGuard Application Firewall
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/netguard --config /etc/netguard/netguard.toml
+ExecStopPost=/usr/local/bin/netguard --cleanup
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/netguard /var/log/netguard /var/run
+
+[Install]
+WantedBy=multi-user.target
