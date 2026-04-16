@@ -224,6 +224,29 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<DashboardStats> {
     Json(stats)
 }
 
+#[derive(serde::Serialize)]
+pub struct StatusResponse {
+    /// Port the web UI is currently bound to. May differ from the configured
+    /// `web.listen_port` if the configured port was busy at startup — the
+    /// server uses a +20 port-fallback window.
+    pub bound_web_port: u16,
+    /// Port mitmdump is currently listening on, or null if mitmproxy is
+    /// disabled.
+    pub bound_mitm_port: Option<u16>,
+    /// True iff mitmproxy is currently running. Equivalent to
+    /// `bound_mitm_port.is_some()` — duplicated for UI legibility.
+    pub mitm_enabled: bool,
+}
+
+pub async fn get_status(State(state): State<AppState>) -> Json<StatusResponse> {
+    let bound_mitm_port = state.mitm_controller.bound_listen_port().await;
+    Json(StatusResponse {
+        bound_web_port: state.listen_port,
+        bound_mitm_port,
+        mitm_enabled: bound_mitm_port.is_some(),
+    })
+}
+
 pub async fn get_mitmproxy_status(
     State(state): State<AppState>,
 ) -> Json<netguard_mitm::MitmControllerStatus> {

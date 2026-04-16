@@ -73,6 +73,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/prompts", get(api::list_prompts))
         .route("/prompts/{id}/respond", post(api::respond_prompt))
         .route("/stats", get(api::get_stats))
+        .route("/status", get(api::get_status))
         .route("/mitmproxy", get(api::get_mitmproxy_status))
         .route("/mitmproxy/enable", post(api::enable_mitmproxy))
         .route("/mitmproxy/disable", post(api::disable_mitmproxy))
