@@ -138,9 +138,11 @@ jobs:
           - arch: x86_64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            nfpm_arch: amd64
           - arch: aarch64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            nfpm_arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -188,13 +190,40 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
+            # Strip leading 'v' for nfpm — versions must start with a digit.
+            NFPM_VERSION="${VERSION#v}"
           else
-            # Dev build — use short SHA so artifacts from different commits
-            # don't collide and are traceable.
-            VERSION="dev-$(git rev-parse --short HEAD)"
+            # Dev build: lexically sortable, all three formats accept dashes.
+            TS="$(date -u +%s)"
+            SHA="$(git rev-parse --short HEAD)"
+            VERSION="dev-$SHA"
+            NFPM_VERSION="0.0.0-dev.${TS}.${SHA}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
+          echo "nfpm_version=$NFPM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION (nfpm: $NFPM_VERSION)"
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.41.0
+          curl -fsSL -o /tmp/nfpm.tar.gz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_${{ matrix.nfpm_arch }}.tar.gz"
+          sudo tar -xzf /tmp/nfpm.tar.gz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build packages (deb, rpm, archlinux)
+        env:
+          NFPM_ARCH: ${{ matrix.nfpm_arch }}
+          NFPM_VERSION: ${{ steps.version.outputs.nfpm_version }}
+          CARGO_TARGET: ${{ matrix.target }}
+        working-directory: packaging
+        run: |
+          mkdir -p ../dist
+          for fmt in deb rpm archlinux; do
+            nfpm pkg --packager "$fmt" --config nfpm.yaml --target ../dist/
+          done
+          ( cd ../dist && sha256sum netguard* > packages.sha256 )
+          ls -la ../dist/
 
       - name: Package tarball
         id: package
@@ -221,6 +250,10 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/packages.sha256
           retention-days: 30
 
   # ------------------------------------------------------------------
