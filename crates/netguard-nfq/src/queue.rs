@@ -221,11 +221,11 @@ pub fn setup_iptables(
 
     if outbound {
         run_iptables(&["-N", "NETGUARD_OUT"])?;
-        if skip_established {
-            run_iptables(&["-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
-        }
         if skip_loopback {
             run_iptables(&["-A", "NETGUARD_OUT", "-o", "lo", "-j", "ACCEPT"])?;
+        }
+        if skip_established {
+            run_iptables(&["-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
         }
         let mut out_args = vec!["-A", "NETGUARD_OUT"];
         out_args.extend_from_slice(&nfq_args);
@@ -233,8 +233,22 @@ pub fn setup_iptables(
         run_iptables(&["-A", "OUTPUT", "-j", "NETGUARD_OUT"])?;
     }
 
+    // Always intercept inbound DNS responses for domain sniffing, even if intercept_inbound is off
+    {
+        let _ = run_iptables(&["-N", "NETGUARD_DNS"]);
+        let mut dns_args = vec!["-A", "NETGUARD_DNS", "-p", "udp", "--sport", "53"];
+        dns_args.extend_from_slice(&nfq_args);
+        let _ = run_iptables(&dns_args);
+        // Everything else in this chain: accept
+        let _ = run_iptables(&["-A", "NETGUARD_DNS", "-j", "ACCEPT"]);
+        let _ = run_iptables(&["-I", "INPUT", "1", "-p", "udp", "--sport", "53", "-j", "NETGUARD_DNS"]);
+    }
+
     if inbound {
         run_iptables(&["-N", "NETGUARD_IN"])?;
+        if skip_loopback {
+            run_iptables(&["-A", "NETGUARD_IN", "-i", "lo", "-j", "ACCEPT"])?;
+        }
         if skip_established {
             run_iptables(&["-A", "NETGUARD_IN", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
         }
@@ -261,6 +275,10 @@ pub fn cleanup_iptables() -> Result<(), NetGuardError> {
     let _ = run_iptables(&["-X", "NETGUARD_OUT"]);
     let _ = run_iptables(&["-F", "NETGUARD_IN"]);
     let _ = run_iptables(&["-X", "NETGUARD_IN"]);
+    // DNS sniffing chain
+    let _ = run_iptables(&["-D", "INPUT", "-p", "udp", "--sport", "53", "-j", "NETGUARD_DNS"]);
+    let _ = run_iptables(&["-F", "NETGUARD_DNS"]);
+    let _ = run_iptables(&["-X", "NETGUARD_DNS"]);
 
     tracing::info!("iptables rules cleaned up");
     Ok(())
