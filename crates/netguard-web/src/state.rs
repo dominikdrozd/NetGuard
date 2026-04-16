@@ -16,6 +16,9 @@ pub struct AppState {
     pub prompt_response_tx: mpsc::Sender<PromptResponse>,
     pub ws_broadcast_tx: broadcast::Sender<WsEvent>,
     pub api_token: String,
+    /// The port the web server is *actually* bound to. May differ from the
+    /// configured `web.listen_port` if that port was busy — the server uses
+    /// `port_probe::try_bind_from` with a +20 fallback window at startup.
     pub listen_port: u16,
     /// Rate limiting: timestamps of failed auth attempts (last 60s)
     pub auth_attempts: Arc<Mutex<Vec<std::time::Instant>>>,
