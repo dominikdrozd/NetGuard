@@ -158,7 +158,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
     headers.insert(
         "Content-Security-Policy",
         HeaderValue::from_static(
-            "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*",
         ),
     );
     response
