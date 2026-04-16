@@ -89,11 +89,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # setup-node's built-in npm cache requires a committed
+      # frontend/package-lock.json. Until one is committed the cache path
+      # would not resolve and the action hard-fails. We cache node_modules
+      # manually via actions/cache so CI is fast either way.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: frontend-node-modules-${{ hashFiles('frontend/package.json', 'frontend/package-lock.json') }}
+          restore-keys: |
+            frontend-node-modules-
 
       - name: Install npm deps
         run: |
@@ -153,8 +162,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/cache@v4
+        with:
+          path: frontend/node_modules
+          key: frontend-node-modules-${{ matrix.arch }}-${{ hashFiles('frontend/package.json', 'frontend/package-lock.json') }}
+          restore-keys: |
+            frontend-node-modules-${{ matrix.arch }}-
 
       - name: Build frontend
         working-directory: frontend
