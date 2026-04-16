@@ -136,10 +136,11 @@ pub fn run_nfqueue_loop(
                     .or_else(|| dns_cache.lookup(&parsed.dst_ip));
 
                 // Build request URL
+                let dst_ip_str = parsed.dst_ip.to_string();
                 let (http_method, request_url) = if let Some(ref info) = http_info {
                     let host = info.host.as_deref()
                         .or(hostname.as_deref())
-                        .unwrap_or(&parsed.dst_ip.to_string());
+                        .unwrap_or(&dst_ip_str);
                     let scheme = if parsed.dst_port == 443 { "https" } else { "http" };
                     (
                         Some(info.method.clone()),
