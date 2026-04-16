@@ -420,7 +420,7 @@ jobs:
   # ------------------------------------------------------------------
   release:
     name: Release
-    needs: [lint, test, build]
+    needs: [lint, test, build, smoke-deb, smoke-rpm, smoke-arch]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -444,6 +444,10 @@ jobs:
           files: |
             release-artifacts/*.tar.gz
             release-artifacts/*.sha256
+            release-artifacts/*.deb
+            release-artifacts/*.rpm
+            release-artifacts/*.pkg.tar.zst
+            release-artifacts/packages.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
@@ -453,19 +457,32 @@ jobs:
 
             ### Install
 
+            **Debian / Ubuntu:**
+            ```bash
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard_${{ github.ref_name }}_amd64.deb
+            sudo apt install ./netguard_${{ github.ref_name }}_amd64.deb
+            ```
+
+            **Fedora / RHEL:**
+            ```bash
+            sudo dnf install https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}.x86_64.rpm
+            ```
+
+            **Arch Linux:**
+            ```bash
+            curl -fsSL -O https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}-x86_64.pkg.tar.zst
+            sudo pacman -U netguard-${{ github.ref_name }}-x86_64.pkg.tar.zst
+            ```
+
+            **Tarball (any distro):**
             ```bash
             curl -fsSL -o netguard.tar.gz \
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}-x86_64-linux.tar.gz
             tar -xzf netguard.tar.gz
             cd netguard-${{ github.ref_name }}-x86_64-linux
-            ./deploy.sh                    # provisioning only
-            ./deploy.sh --enable-mitm      # also flip HTTPS decrypt on
+            ./deploy.sh
             ```
 
-            Each tarball contains:
-            - `netguard` — daemon binary (frontend embedded via rust-embed)
-            - `netguard.toml` — default config
-            - `netguard.service` — systemd unit
-            - `deploy.sh` — installer
+            **All install paths are "safe mode" by default:** mitmproxy stays disabled until you opt in via the web UI toggle. HTTPS decryption never happens on install.
 
-            Verify with `sha256sum -c netguard-*.tar.gz.sha256`.
+            Verify with `sha256sum -c packages.sha256` (packages) or the matching `.sha256` file (tarball).
