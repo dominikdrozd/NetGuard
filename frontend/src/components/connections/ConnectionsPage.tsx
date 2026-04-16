@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../../hooks/useApi';
 import { useConnectionStore } from '../../stores/connectionStore';
-import { VerdictBadge, ProtocolBadge } from '../common/Badge';
+import { VerdictBadge, ProtocolBadge, HttpBadge } from '../common/Badge';
 import { appName, formatTime, formatSize, protocolStr } from '../../utils/format';
 import type { Connection } from '../../types';
 
@@ -80,7 +80,12 @@ export function ConnectionsPage({ onSelect }: { onSelect: (id: string) => void }
                 <td className="domain-label truncate">{c.request_url || c.hostname || '-'}</td>
                 <td className="text-mono">{c.dst_ip}</td>
                 <td className="text-mono">{c.dst_port}</td>
-                <td><ProtocolBadge protocol={c.protocol} /></td>
+                <td>
+                  <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }}>
+                    <ProtocolBadge protocol={c.protocol} />
+                    <HttpBadge conn={c} />
+                  </span>
+                </td>
                 <td>{formatSize(c.packet_size)}</td>
                 <td><VerdictBadge verdict={c.verdict} /></td>
               </tr>

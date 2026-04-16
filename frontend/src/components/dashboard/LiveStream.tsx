@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useConnectionStore } from '../../stores/connectionStore';
-import { VerdictBadge, ProtocolBadge } from '../common/Badge';
+import { VerdictBadge, ProtocolBadge, HttpBadge } from '../common/Badge';
 import { appName, timeAgo, formatSize } from '../../utils/format';
 import type { Connection } from '../../types';
 
@@ -35,7 +35,10 @@ export function LiveStream({ onSelect }: { onSelect: (id: string) => void }) {
           <VerdictBadge verdict={c.verdict} />
           <span className="app-name truncate">{appName(c.process)}</span>
           <span className="dest text-mono">{c.request_url || (c.hostname ? `${c.hostname}:${c.dst_port}` : `${c.dst_ip}:${c.dst_port}`)}</span>
-          <ProtocolBadge protocol={c.protocol} />
+          <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center', flexWrap: 'nowrap' }}>
+            <ProtocolBadge protocol={c.protocol} />
+            <HttpBadge conn={c} />
+          </span>
           <span className="time">{formatSize(c.packet_size)}</span>
           <span className="time">{timeAgo(c.timestamp)}</span>
         </div>

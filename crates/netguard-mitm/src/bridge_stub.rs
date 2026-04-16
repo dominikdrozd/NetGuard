@@ -23,6 +23,10 @@ pub struct MitmBridgeHandle {
     pub cache: Arc<MitmFlowCache>,
 }
 
+impl MitmBridgeHandle {
+    pub async fn shutdown(self) {}
+}
+
 pub async fn spawn_mitm_bridge(
     _cfg: MitmBridgeConfig,
     _cache: Arc<MitmFlowCache>,

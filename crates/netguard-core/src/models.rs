@@ -86,6 +86,16 @@ pub struct Connection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnrichmentDelta {
+    /// Full request URL (scheme + host + path + query), populated from
+    /// mitmproxy's decrypted view. Overrides anything the NFQUEUE HTTP parser
+    /// extracted from plaintext, which is important for HTTPS where the
+    /// NFQUEUE side only has the TLS ClientHello and the SNI hostname.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decrypted_request_headers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

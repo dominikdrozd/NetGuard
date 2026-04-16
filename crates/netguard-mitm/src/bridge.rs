@@ -33,6 +33,33 @@ pub struct MitmBridgeHandle {
     pub child: Child,
     pub listener_task: JoinHandle<()>,
     pub evictor_task: JoinHandle<()>,
+    pub socket_path: PathBuf,
+}
+
+impl MitmBridgeHandle {
+    /// Graceful async shutdown that:
+    ///   1. Aborts the listener + evictor tokio tasks (they hold file
+    ///      descriptors for the unix socket; just dropping their JoinHandles
+    ///      would leak the tasks).
+    ///   2. Sends SIGKILL to mitmdump and awaits its exit so the kernel
+    ///      fully releases `listen_port` before the next `enable()` tries
+    ///      to bind it (race that made a rapid off->on toggle crash with
+    ///      "Address already in use").
+    ///   3. Removes the unix socket file so the next `bind()` starts from a
+    ///      clean slate.
+    pub async fn shutdown(mut self) {
+        self.listener_task.abort();
+        self.evictor_task.abort();
+        let _ = self.child.start_kill();
+        // Bounded wait: mitmdump normally dies instantly on SIGKILL, but
+        // don't hang forever if the kernel is slow to reap.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.child.wait(),
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&self.socket_path).await;
+    }
 }
 
 /// Start the mitmdump child process and the Unix-socket listener that receives
@@ -169,6 +196,7 @@ pub async fn spawn_mitm_bridge(
         child,
         listener_task,
         evictor_task,
+        socket_path: cfg.socket_path.clone(),
     })
 }
 

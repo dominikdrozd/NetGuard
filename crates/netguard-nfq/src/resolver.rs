@@ -58,6 +58,21 @@ fn is_http_ish(conn: &Connection) -> bool {
     matches!(conn.dst_port, 80 | 443 | 8080 | 8443)
 }
 
+/// Extract the host portion from a URL like `https://example.com:443/path?q=1`
+/// without pulling in the `url` crate. Returns None if the URL doesn't look
+/// well-formed. Strips `:port` so the `hostname` field stays canonical.
+fn url_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_portion = after_scheme.split(['/', '?', '#']).next()?;
+    let host_no_port = host_portion.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_portion);
+    let host_no_userinfo = host_no_port.rsplit_once('@').map(|(_, h)| h).unwrap_or(host_no_port);
+    if host_no_userinfo.is_empty() {
+        None
+    } else {
+        Some(host_no_userinfo.to_string())
+    }
+}
+
 fn spawn_enrichment_task(
     cache: Arc<MitmFlowCache>,
     event_tx: broadcast::Sender<WsEvent>,
@@ -92,7 +107,19 @@ fn spawn_enrichment_task(
                     );
                     return;
                 }
+                // Promote the decrypted URL into the connection's primary
+                // request_url field so the connections list + live stream
+                // show the full path (scheme + host + path + query), not
+                // just the SNI hostname. hostname is derived from the URL.
+                let hostname_from_url = url_host(&flow.url);
                 let delta = EnrichmentDelta {
+                    request_url: Some(flow.url),
+                    http_method: if flow.method.is_empty() {
+                        None
+                    } else {
+                        Some(flow.method)
+                    },
+                    hostname: hostname_from_url,
                     decrypted_request_headers: Some(flow.request_headers),
                     decrypted_request_body: if flow.request_body.is_empty() {
                         None

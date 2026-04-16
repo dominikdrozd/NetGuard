@@ -165,7 +165,10 @@ impl MitmProxyController {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if let Err(e) = install_redirect(self.bridge_cfg.uid, self.bridge_cfg.listen_port) {
             tracing::error!("failed to install REDIRECT rules: {e}");
-            drop(handle);
+            // Tear the half-started bridge down cleanly: SIGKILL mitmdump,
+            // await reap, remove socket, abort tasks. Otherwise the port
+            // stays bound and the next enable() races on `bind()`.
+            handle.shutdown().await;
             return Err(MitmError::Iptables(e));
         }
         state.bridge = Some(handle);
@@ -174,18 +177,28 @@ impl MitmProxyController {
         Ok(())
     }
 
-    /// Remove REDIRECT rules and drop the bridge (kill_on_drop terminates
-    /// mitmdump). Idempotent.
+    /// Remove REDIRECT rules and shut the bridge down gracefully. Waits for
+    /// mitmdump to actually exit + releases the listen port + removes the
+    /// unix socket before returning, so a subsequent `enable()` gets a clean
+    /// slate (avoids `Address already in use` on rapid toggle off → on).
+    /// Idempotent.
     pub async fn disable(&self) -> Result<(), MitmError> {
-        let mut state = self.state.lock().await;
-        if !state.enabled {
-            return Ok(());
-        }
+        // Take the handle out of shared state first so we don't hold the
+        // state mutex across the (potentially multi-second) shutdown wait.
+        let bridge = {
+            let mut state = self.state.lock().await;
+            if !state.enabled {
+                return Ok(());
+            }
+            state.enabled = false;
+            state.bridge.take()
+        };
         if let Err(e) = remove_redirect() {
             tracing::warn!("REDIRECT cleanup reported an error: {e}");
         }
-        state.bridge = None;
-        state.enabled = false;
+        if let Some(handle) = bridge {
+            handle.shutdown().await;
+        }
         tracing::info!("mitmproxy disabled");
         Ok(())
     }

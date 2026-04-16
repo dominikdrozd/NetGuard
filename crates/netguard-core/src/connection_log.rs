@@ -162,6 +162,9 @@ impl ConnectionLog {
                 delta.clone()
             } else {
                 EnrichmentDelta {
+                    request_url: delta.request_url.clone(),
+                    http_method: delta.http_method.clone(),
+                    hostname: delta.hostname.clone(),
                     decrypted_request_headers: delta.decrypted_request_headers.clone(),
                     decrypted_request_body: None,
                     decrypted_response_status: delta.decrypted_response_status,
@@ -172,6 +175,18 @@ impl ConnectionLog {
             self.write_disk(DiskRecord::Enrich { id, fields: &disk_delta });
         }
 
+        // Overwrite the NFQUEUE-derived hostname/URL/method if mitmproxy
+        // provided decrypted equivalents — the decrypted view is always more
+        // accurate (full path for HTTPS, real method/host even for h2).
+        if delta.request_url.is_some() {
+            conn.request_url = delta.request_url;
+        }
+        if delta.http_method.is_some() {
+            conn.http_method = delta.http_method;
+        }
+        if let Some(host) = delta.hostname {
+            conn.hostname = Some(host);
+        }
         if delta.decrypted_request_headers.is_some() {
             conn.decrypted_request_headers = delta.decrypted_request_headers;
         }
