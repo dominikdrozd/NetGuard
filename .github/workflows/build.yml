@@ -1,0 +1,267 @@
+name: Build
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Tell rustc to use sparse registry (faster on CI)
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+jobs:
+  # ------------------------------------------------------------------
+  # Lint — informational on existing code, strict on new code via
+  # --deny warnings for clippy once the tree is clean. Non-blocking
+  # today (clippy / fmt reported, but never fail the PR).
+  # ------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libnetfilter-queue-dev libnfnetlink-dev libmnl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt --check
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --no-deps -- -W clippy::all
+
+  # ------------------------------------------------------------------
+  # Rust tests. Most tests are pure logic (rule engine, config parse);
+  # NFQUEUE-backed code paths are not exercised under unit tests so no
+  # root privilege is required.
+  # ------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libnetfilter-queue-dev libnfnetlink-dev libmnl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - run: cargo test --workspace --no-fail-fast
+
+  # ------------------------------------------------------------------
+  # Frontend sanity check — type-check + vite build.
+  # ------------------------------------------------------------------
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install npm deps
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: vite build
+        run: npm run build
+
+  # ------------------------------------------------------------------
+  # Release build — produces a self-contained tarball with the
+  # daemon binary (frontend embedded via rust-embed), default config,
+  # systemd unit, and deploy script. Matrix over x86_64 and aarch64.
+  # aarch64 uses free GitHub ARM runners (available for public repos);
+  # if unavailable on your plan, the job marks itself as failed but
+  # won't block x86_64.
+  # ------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: [test, frontend]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libnetfilter-queue-dev libnfnetlink-dev libmnl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build-${{ matrix.arch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm run build
+
+      - name: Build daemon (release)
+        run: cargo build --release --bin netguard --target ${{ matrix.target }}
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            # Dev build — use short SHA so artifacts from different commits
+            # don't collide and are traceable.
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Package tarball
+        id: package
+        run: |
+          PKG="netguard-${{ steps.version.outputs.version }}-${{ matrix.arch }}-linux"
+          STAGE="dist/$PKG"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/netguard" "$STAGE/"
+          cp config/netguard.toml "$STAGE/"
+          cp systemd/netguard.service "$STAGE/"
+          cp deploy.sh "$STAGE/"
+          chmod +x "$STAGE/netguard" "$STAGE/deploy.sh"
+          # Ship README + LICENSE if present (optional)
+          for f in README.md LICENSE LICENSE.md; do
+            [ -f "$f" ] && cp "$f" "$STAGE/" || true
+          done
+          (cd dist && tar -czf "$PKG.tar.gz" "$PKG" && sha256sum "$PKG.tar.gz" > "$PKG.tar.gz.sha256")
+          echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netguard-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          retention-days: 30
+
+  # ------------------------------------------------------------------
+  # Release job — only runs on tag push (e.g. v0.2.0). Collects the
+  # per-arch artifacts, attaches them to a GitHub release with
+  # auto-generated release notes.
+  # ------------------------------------------------------------------
+  release:
+    name: Release
+    needs: [lint, test, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -la release-artifacts/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/*.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## NetGuard ${{ github.ref_name }}
+
+            Linux application firewall — Rust + React. See README for install.
+
+            ### Install
+
+            ```bash
+            curl -fsSL -o netguard.tar.gz \
+              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/netguard-${{ github.ref_name }}-x86_64-linux.tar.gz
+            tar -xzf netguard.tar.gz
+            cd netguard-${{ github.ref_name }}-x86_64-linux
+            ./deploy.sh                    # provisioning only
+            ./deploy.sh --enable-mitm      # also flip HTTPS decrypt on
+            ```
+
+            Each tarball contains:
+            - `netguard` — daemon binary (frontend embedded via rust-embed)
+            - `netguard.toml` — default config
+            - `netguard.service` — systemd unit
+            - `deploy.sh` — installer
+
+            Verify with `sha256sum -c netguard-*.tar.gz.sha256`.
