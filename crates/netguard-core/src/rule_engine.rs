@@ -348,6 +348,8 @@ mod tests {
             rule_id: None,
             direction: Direction::Outbound,
             hostname: None,
+            http_method: None,
+            request_url: None,
             payload_hex: None,
             packet_size: 0,
         }

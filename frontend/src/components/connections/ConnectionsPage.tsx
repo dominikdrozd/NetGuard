@@ -77,7 +77,7 @@ export function ConnectionsPage({ onSelect }: { onSelect: (id: string) => void }
               <tr key={c.id} className="clickable" onClick={() => onSelect(c.id)}>
                 <td className="text-mono">{formatTime(c.timestamp)}</td>
                 <td className="truncate">{appName(c.process)}</td>
-                <td className="domain-label truncate">{c.hostname || '-'}</td>
+                <td className="domain-label truncate">{c.request_url || c.hostname || '-'}</td>
                 <td className="text-mono">{c.dst_ip}</td>
                 <td className="text-mono">{c.dst_port}</td>
                 <td><ProtocolBadge protocol={c.protocol} /></td>

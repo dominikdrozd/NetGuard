@@ -52,6 +52,12 @@ export function PacketDetailModal({ connectionId, onClose }: Props) {
           <Row label="Command" value={c.process ? c.process.cmdline : '-'} />
           <Row label="PID / User" value={c.process ? `${c.process.pid} / ${c.process.username || c.process.uid}` : '-'} />
           <Row label="Domain" value={c.hostname || 'not resolved'} className="domain-label" />
+          {c.request_url && (
+            <Row label="URL" value={c.request_url} mono />
+          )}
+          {c.http_method && (
+            <Row label="HTTP Method" value={c.http_method} />
+          )}
           <Row label="Direction" value={c.direction} />
           <Row label="Source" value={`${c.src_ip}:${c.src_port}`} mono />
           <Row label="Destination" value={`${c.dst_ip}:${c.dst_port}`} mono />

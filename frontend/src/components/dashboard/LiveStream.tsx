@@ -34,7 +34,7 @@ export function LiveStream({ onSelect }: { onSelect: (id: string) => void }) {
         <div key={c.id} className="stream-entry clickable" onClick={() => onSelect(c.id)}>
           <VerdictBadge verdict={c.verdict} />
           <span className="app-name truncate">{appName(c.process)}</span>
-          <span className="dest text-mono">{c.hostname || c.dst_ip}:{c.dst_port}</span>
+          <span className="dest text-mono">{c.request_url || (c.hostname ? `${c.hostname}:${c.dst_port}` : `${c.dst_ip}:${c.dst_port}`)}</span>
           <ProtocolBadge protocol={c.protocol} />
           <span className="time">{formatSize(c.packet_size)}</span>
           <span className="time">{timeAgo(c.timestamp)}</span>

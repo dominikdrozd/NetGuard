@@ -1,6 +1,7 @@
 use crate::dns::DnsCache;
 use crate::packet::parse_ip_packet;
 use crate::procmap::ProcMapper;
+use crate::http;
 use crate::tls;
 use chrono::Utc;
 use netguard_core::errors::NetGuardError;
@@ -123,9 +124,33 @@ pub fn run_nfqueue_loop(
                     dns_cache.parse_dns_response(&parsed.transport_payload);
                 }
 
-                // Resolve hostname: try TLS SNI first, then DNS cache
-                let hostname = tls::extract_sni(&parsed.transport_payload)
+                // Parse HTTP request info (method, path, host)
+                let http_info = http::parse_http_request(&parsed.transport_payload);
+
+                // Extract TLS SNI for HTTPS domain
+                let tls_sni = tls::extract_sni(&parsed.transport_payload);
+
+                // Resolve hostname: TLS SNI > HTTP Host header > DNS cache
+                let hostname = tls_sni.clone()
+                    .or_else(|| http_info.as_ref().and_then(|h| h.host.clone()))
                     .or_else(|| dns_cache.lookup(&parsed.dst_ip));
+
+                // Build request URL
+                let (http_method, request_url) = if let Some(ref info) = http_info {
+                    let host = info.host.as_deref()
+                        .or(hostname.as_deref())
+                        .unwrap_or(&parsed.dst_ip.to_string());
+                    let scheme = if parsed.dst_port == 443 { "https" } else { "http" };
+                    (
+                        Some(info.method.clone()),
+                        Some(format!("{scheme}://{host}{}", info.path)),
+                    )
+                } else if let Some(ref sni) = tls_sni {
+                    // HTTPS but path is encrypted
+                    (None, Some(format!("https://{sni}/...")))
+                } else {
+                    (None, None)
+                };
 
                 // Build full payload hex
                 let payload_hex = if !parsed.transport_payload.is_empty() {
@@ -153,6 +178,8 @@ pub fn run_nfqueue_loop(
                     rule_id: None,
                     direction,
                     hostname,
+                    http_method,
+                    request_url,
                     payload_hex,
                     packet_size: parsed.packet_size,
                 };

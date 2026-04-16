@@ -61,7 +61,13 @@ pub struct Connection {
     pub rule_id: Option<Uuid>,
     pub direction: Direction,
     pub hostname: Option<String>,
-    /// Hex dump of first bytes of transport-layer payload (after IP+TCP/UDP headers)
+    /// HTTP method (GET, POST, etc.) if detected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_method: Option<String>,
+    /// Full request URL (e.g. https://example.com/path)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_url: Option<String>,
+    /// Hex dump of transport-layer payload
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_hex: Option<String>,
     /// Size of the full packet in bytes

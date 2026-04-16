@@ -24,6 +24,8 @@ export interface Connection {
   rule_id: string | null;
   direction: Direction;
   hostname: string | null;
+  http_method?: string;
+  request_url?: string;
   payload_hex?: string;
   packet_size: number;
 }
