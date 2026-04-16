@@ -233,11 +233,13 @@ impl AppConfig {
 }
 
 /// Resolve a system username to its numeric UID and primary GID using getpwnam.
-/// Returns an error for empty names, names that don't resolve, and names whose
-/// UID is root or a low-numbered system UID (UID < 1000 is disallowed because
-/// installing an owner-match RETURN rule for root or a core system service
-/// would turn the firewall into a free bypass for anything running under that
-/// UID).
+///
+/// Refuses empty names, names that don't resolve, and UID 0 (root). We allow
+/// standard system UIDs (>=1) because dedicated service users created via
+/// `useradd -r` are assigned UIDs in the 100-999 range by Debian/Ubuntu/Fedora
+/// policy — rejecting them would make deploy.sh's `netguard-mitm` account
+/// unusable. The residual risk (a legacy system UID being recycled) is
+/// documented in the threat-model section of README.md.
 #[cfg(target_os = "linux")]
 pub fn resolve_system_user(name: &str) -> Result<(u32, u32), NetGuardError> {
     use std::ffi::CString;
@@ -254,9 +256,9 @@ pub fn resolve_system_user(name: &str) -> Result<(u32, u32), NetGuardError> {
     }
     let uid = unsafe { (*entry).pw_uid };
     let gid = unsafe { (*entry).pw_gid };
-    if uid < 1000 {
+    if uid == 0 {
         return Err(NetGuardError::Config(format!(
-            "mitmproxy uid_user '{name}' resolved to UID {uid} (< 1000). Refusing to install owner-match rules for a system or root UID."
+            "mitmproxy uid_user '{name}' resolved to UID 0 (root). Refusing: installing an owner-match RETURN for root would bypass the firewall for every root process."
         )));
     }
     Ok((uid, gid))

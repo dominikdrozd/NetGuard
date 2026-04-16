@@ -6,8 +6,27 @@
 #
 # Re-running this script is safe: each step checks for existing state before
 # acting. It will never overwrite /etc/netguard/netguard.toml once present.
+#
+# Flags:
+#   --enable-mitm   Also turn on HTTPS decryption end-to-end: set
+#                   mitmproxy.enabled=true and allow_runtime_toggle=true
+#                   in /etc/netguard/netguard.toml, and install the
+#                   mitmproxy CA into the system trust store.
+#                   This is invasive — browsers still need per-browser import.
 
 set -e
+
+ENABLE_MITM=0
+for arg in "$@"; do
+    case "$arg" in
+        --enable-mitm) ENABLE_MITM=1 ;;
+        -h|--help)
+            grep -E '^#( |$)' "$0" | sed 's/^# \?//'
+            exit 0
+            ;;
+        *) echo "unknown flag: $arg" >&2; exit 1 ;;
+    esac
+done
 
 echo "=== NetGuard Deploy ==="
 
@@ -219,13 +238,78 @@ if ! id -u netguard-mitm >/dev/null 2>&1; then
 fi
 sudo install -d -o netguard-mitm -g netguard-mitm -m 0750 /var/lib/netguard/mitm
 
-# Generate the mitm CA on disk if not already there. The CA is NOT installed
-# into the system trust store here — that's an opt-in step documented in
-# README "Decrypting HTTPS content".
+# Generate the mitm CA on disk if not already there. mitmproxy only writes the
+# CA when it actually starts and initializes its confdir, so we briefly launch
+# mitmdump on a high unused port and kill it after a couple seconds. The CA
+# is NOT installed into the system trust store here unless --enable-mitm was
+# passed — see the trust block further down.
 if ! sudo test -f /var/lib/netguard/mitm/mitmproxy-ca-cert.pem; then
-    echo "  Bootstrapping mitmproxy CA (not trusted yet)"
-    sudo -u netguard-mitm HOME=/var/lib/netguard/mitm \
-        mitmdump --set confdir=/var/lib/netguard/mitm --help >/dev/null 2>&1 || true
+    echo "  Bootstrapping mitmproxy CA (this may take a few seconds)..."
+    # Pick a random high port so we never collide with the real mitmproxy or
+    # anything else the user has running.
+    BOOTSTRAP_PORT=$(( (RANDOM % 10000) + 40000 ))
+    # SIGKILL after 4s. mitmdump initializes the CA before it finishes binding
+    # the listener, so even if we kill it fast the cert is on disk.
+    sudo -u netguard-mitm env HOME=/var/lib/netguard/mitm \
+        timeout -s KILL 4 \
+        mitmdump \
+            --set confdir=/var/lib/netguard/mitm \
+            --listen-host 127.0.0.1 \
+            --listen-port "$BOOTSTRAP_PORT" \
+            --mode regular \
+            --set termlog_verbosity=error \
+            >/dev/null 2>&1 || true
+    if sudo test -f /var/lib/netguard/mitm/mitmproxy-ca-cert.pem; then
+        echo "  CA generated at /var/lib/netguard/mitm/mitmproxy-ca-cert.pem"
+    else
+        echo "  ! CA was NOT generated. Try manually:" >&2
+        echo "    sudo -u netguard-mitm HOME=/var/lib/netguard/mitm mitmdump --set confdir=/var/lib/netguard/mitm --listen-port $BOOTSTRAP_PORT" >&2
+        echo "    (Ctrl+C after a few seconds)" >&2
+    fi
+fi
+
+# If --enable-mitm was passed, flip the two flags in /etc/netguard/netguard.toml
+# to turn on HTTPS decryption + runtime toggle, and install the CA into the
+# system trust store. This section is the ONLY place deploy.sh changes an
+# existing config file.
+if [ "$ENABLE_MITM" = "1" ]; then
+    echo "  Enabling HTTPS decryption in /etc/netguard/netguard.toml"
+    # Use sed only inside the [mitmproxy] section so we don't accidentally
+    # touch an 'enabled' key in a different section.
+    sudo python3 - <<'PY'
+import re, pathlib
+p = pathlib.Path("/etc/netguard/netguard.toml")
+text = p.read_text()
+
+def set_in_section(text, section, key, value):
+    # Find [section] ... until next [header] or EOF
+    pattern = re.compile(rf"(\[{re.escape(section)}\](?:.|\n)*?)(?=\n\[|\Z)")
+    m = pattern.search(text)
+    if not m:
+        # Section missing — append it
+        return text.rstrip() + f"\n\n[{section}]\n{key} = {value}\n"
+    block = m.group(1)
+    key_re = re.compile(rf"(?m)^{re.escape(key)}\s*=.*$")
+    if key_re.search(block):
+        new_block = key_re.sub(f"{key} = {value}", block)
+    else:
+        new_block = block.rstrip() + f"\n{key} = {value}\n"
+    return text[: m.start()] + new_block + text[m.end():]
+
+text = set_in_section(text, "mitmproxy", "enabled", "true")
+text = set_in_section(text, "mitmproxy", "allow_runtime_toggle", "true")
+p.write_text(text)
+print("  ok")
+PY
+
+    if sudo test -f /var/lib/netguard/mitm/mitmproxy-ca-cert.pem; then
+        echo "  Trusting mitmproxy CA system-wide"
+        sudo install -m 0644 /var/lib/netguard/mitm/mitmproxy-ca-cert.pem \
+            /usr/local/share/ca-certificates/netguard-mitm.crt
+        sudo update-ca-certificates >/dev/null
+    else
+        echo "  ! CA file missing; skipping system trust install" >&2
+    fi
 fi
 
 # systemd unit (only copy if the source exists and the installed copy differs
@@ -262,5 +346,15 @@ echo "Status:  sudo systemctl status netguard"
 echo "Logs:    sudo journalctl -u netguard -f"
 echo "Token:   sudo cat /etc/netguard/api_token"
 echo ""
-echo "HTTPS decryption defaults to DISABLED. To enable, see README.md"
-echo "section 'Decrypting HTTPS content' — you'll need to trust the CA."
+if [ "$ENABLE_MITM" = "1" ]; then
+    echo "HTTPS decryption: ENABLED. The mitmproxy CA is trusted system-wide."
+    echo "Browsers still need per-browser import — use the 'Download CA' button"
+    echo "in the sidebar + 'How to install' helper."
+    echo ""
+    echo "Test it:"
+    echo "  curl https://httpbin.org/get"
+    echo "  # then click the connection in the web UI"
+else
+    echo "HTTPS decryption: DISABLED (safe default)."
+    echo "To enable end-to-end, re-run:  ./deploy.sh --enable-mitm"
+fi

@@ -145,8 +145,8 @@ impl MitmProxyController {
         // install_redirect would install `-m owner --uid-owner 0 -j RETURN`,
         // which is a root-bypass for mitmproxy. This check is belt-and-suspenders
         // with the startup resolve (see netguard_core::config::resolve_system_user
-        // which already rejects UID 0 and UID < 1000); the unwrap_or(0) fallback
-        // in main.rs could otherwise feed a zero here silently.
+        // which already rejects UID 0); the unwrap_or(0) fallback in main.rs
+        // could otherwise feed a zero here silently if getpwnam failed.
         if self.bridge_cfg.uid == 0 {
             return Err(MitmError::NotConfigured(format!(
                 "mitmproxy uid_user '{}' did not resolve to a valid non-root UID at startup",
