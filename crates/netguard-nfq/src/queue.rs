@@ -38,6 +38,7 @@ pub fn run_nfqueue_loop(
 
     tracing::info!("NFQUEUE bound to queue {queue_num}");
 
+    let my_pid = std::process::id();
     let mut consecutive_errors: u32 = 0;
 
     loop {
@@ -66,6 +67,15 @@ pub fn run_nfqueue_loop(
                     parsed.src_ip,
                     parsed.src_port,
                 );
+
+                // Skip our own traffic (prevents feedback loops)
+                if process.as_ref().map_or(false, |p| p.pid == my_pid) {
+                    msg.set_verdict(nfq::Verdict::Accept);
+                    if let Err(e) = queue.verdict(msg) {
+                        tracing::error!("Failed to set verdict: {e}");
+                    }
+                    continue;
+                }
 
                 // Check whitelist
                 let is_whitelisted = process.as_ref().map_or(false, |p| {

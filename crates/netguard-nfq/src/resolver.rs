@@ -18,8 +18,9 @@ pub async fn run_event_processor(
     while let Some(event) = event_rx.recv().await {
         let mut conn = event.connection;
 
-        // If hostname wasn't resolved by the DNS sniffer, try async reverse lookup
-        if conn.hostname.is_none() {
+        // Resolve hostname, but skip DNS traffic (port 53) to avoid feedback loop:
+        // reverse DNS lookup -> DNS query -> intercepted -> reverse DNS lookup -> ...
+        if conn.hostname.is_none() && conn.dst_port != 53 {
             let ip = conn.dst_ip;
             let cache = dns_cache.clone();
 
