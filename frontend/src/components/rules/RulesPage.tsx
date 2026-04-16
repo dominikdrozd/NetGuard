@@ -71,7 +71,7 @@ function RuleFormModal({ open, onClose, onCreated }: { open: boolean; onClose: (
   const [remotePort, setRemotePort] = useState('');
   const [protocol, setProtocol] = useState('');
   const [direction, setDirection] = useState('');
-  const [verdict, setVerdict] = useState<Verdict>('allow');
+  const [verdict, setVerdict] = useState<'allow' | 'deny'>('allow');
   const [note, setNote] = useState('');
 
   const save = async () => {
@@ -105,7 +105,7 @@ function RuleFormModal({ open, onClose, onCreated }: { open: boolean; onClose: (
         <select value={direction} onChange={e => setDirection(e.target.value)}><option value="">Both</option><option value="outbound">Outbound</option><option value="inbound">Inbound</option></select>
       </div>
       <div className="form-group"><label>Verdict</label>
-        <select value={verdict} onChange={e => setVerdict(e.target.value as Verdict)}><option value="allow">Allow</option><option value="deny">Deny</option></select>
+        <select value={verdict} onChange={e => setVerdict(e.target.value as 'allow' | 'deny')}><option value="allow">Allow</option><option value="deny">Deny</option></select>
       </div>
       <div className="form-group"><label>Note</label><input value={note} onChange={e => setNote(e.target.value)} placeholder="Description..." /></div>
       <div className="form-actions">

@@ -17,7 +17,7 @@ export function PacketDetailModal({ connectionId, onClose }: Props) {
   const c = connectionId ? connections.find(x => x.id === connectionId) : null;
   const [ruleCreated, setRuleCreated] = useState<'allow' | 'deny' | null>(null);
 
-  const createRule = async (verdict: Verdict) => {
+  const createRule = async (verdict: 'allow' | 'deny') => {
     if (!c) return;
     const req: CreateRuleRequest = {
       app_path: c.process?.exe_path || '*',
