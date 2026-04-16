@@ -1,6 +1,7 @@
 use crate::dns::DnsCache;
 use crate::packet::parse_ip_packet;
 use crate::procmap::ProcMapper;
+use crate::tls;
 use chrono::Utc;
 use netguard_core::errors::NetGuardError;
 use netguard_core::models::*;
@@ -122,8 +123,9 @@ pub fn run_nfqueue_loop(
                     dns_cache.parse_dns_response(&parsed.transport_payload);
                 }
 
-                // Resolve hostname from DNS cache
-                let hostname = dns_cache.lookup(&parsed.dst_ip);
+                // Resolve hostname: try TLS SNI first, then DNS cache
+                let hostname = tls::extract_sni(&parsed.transport_payload)
+                    .or_else(|| dns_cache.lookup(&parsed.dst_ip));
 
                 // Build payload hex preview (first 128 bytes)
                 let payload_hex = if !parsed.transport_payload.is_empty() {
@@ -225,7 +227,20 @@ pub fn setup_iptables(
             run_iptables(&["-A", "NETGUARD_OUT", "-o", "lo", "-j", "ACCEPT"])?;
         }
         if skip_established {
-            run_iptables(&["-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+            // Accept established traffic EXCEPT the first 10 packets per connection
+            // This captures SYN + TLS handshake + initial data for payload inspection
+            // while letting bulk data flow without userspace overhead
+            let connbytes_works = run_iptables(&[
+                "-A", "NETGUARD_OUT",
+                "-m", "state", "--state", "ESTABLISHED,RELATED",
+                "-m", "connbytes", "--connbytes", "10:", "--connbytes-dir", "both", "--connbytes-mode", "packets",
+                "-j", "ACCEPT",
+            ]).is_ok();
+            if !connbytes_works {
+                // Fallback: skip all established if connbytes module not available
+                tracing::warn!("connbytes module not available, falling back to skip all established");
+                run_iptables(&["-A", "NETGUARD_OUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+            }
         }
         let mut out_args = vec!["-A", "NETGUARD_OUT"];
         out_args.extend_from_slice(&nfq_args);
@@ -250,10 +265,15 @@ pub fn setup_iptables(
             run_iptables(&["-A", "NETGUARD_IN", "-i", "lo", "-j", "ACCEPT"])?;
         }
         if skip_established {
-            run_iptables(&["-A", "NETGUARD_IN", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
-        }
-        if skip_loopback {
-            run_iptables(&["-A", "NETGUARD_IN", "-i", "lo", "-j", "ACCEPT"])?;
+            let connbytes_works = run_iptables(&[
+                "-A", "NETGUARD_IN",
+                "-m", "state", "--state", "ESTABLISHED,RELATED",
+                "-m", "connbytes", "--connbytes", "10:", "--connbytes-dir", "both", "--connbytes-mode", "packets",
+                "-j", "ACCEPT",
+            ]).is_ok();
+            if !connbytes_works {
+                run_iptables(&["-A", "NETGUARD_IN", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"])?;
+            }
         }
         let mut in_args = vec!["-A", "NETGUARD_IN"];
         in_args.extend_from_slice(&nfq_args);
