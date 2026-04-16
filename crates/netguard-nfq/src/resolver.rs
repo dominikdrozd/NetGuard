@@ -18,21 +18,10 @@ pub async fn run_event_processor(
     while let Some(event) = event_rx.recv().await {
         let mut conn = event.connection;
 
-        // Resolve hostname, but skip DNS traffic (port 53) to avoid feedback loop:
-        // reverse DNS lookup -> DNS query -> intercepted -> reverse DNS lookup -> ...
-        if conn.hostname.is_none() && conn.dst_port != 53 {
-            let ip = conn.dst_ip;
-            let cache = dns_cache.clone();
-
-            // Check DNS cache first (might have been populated by another packet)
-            if let Some(domain) = cache.lookup(&ip) {
+        // Resolve hostname from DNS cache only (no active lookups to avoid feedback loops)
+        if conn.hostname.is_none() {
+            if let Some(domain) = dns_cache.lookup(&conn.dst_ip) {
                 conn.hostname = Some(domain);
-            } else {
-                // Async reverse DNS lookup (non-blocking)
-                if let Some(hostname) = reverse_dns_lookup(ip).await {
-                    cache.insert(ip, hostname.clone());
-                    conn.hostname = Some(hostname);
-                }
             }
         }
 

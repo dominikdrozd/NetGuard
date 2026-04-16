@@ -77,6 +77,20 @@ pub fn run_nfqueue_loop(
                     continue;
                 }
 
+                // Skip DNS traffic (port 53) -- always allow, don't log
+                // Prevents feedback loop from reverse DNS lookups
+                if parsed.dst_port == 53 || parsed.src_port == 53 {
+                    msg.set_verdict(nfq::Verdict::Accept);
+                    if let Err(e) = queue.verdict(msg) {
+                        tracing::error!("Failed to set verdict: {e}");
+                    }
+                    // Still feed to DNS sniffer for domain resolution
+                    if parsed.src_port == 53 {
+                        dns_cache.parse_dns_response(&parsed.transport_payload);
+                    }
+                    continue;
+                }
+
                 // Check whitelist
                 let is_whitelisted = process.as_ref().map_or(false, |p| {
                     whitelist.iter().any(|w| {
