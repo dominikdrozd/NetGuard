@@ -127,11 +127,10 @@ pub fn run_nfqueue_loop(
                 let hostname = tls::extract_sni(&parsed.transport_payload)
                     .or_else(|| dns_cache.lookup(&parsed.dst_ip));
 
-                // Build payload hex preview (first 128 bytes)
+                // Build full payload hex
                 let payload_hex = if !parsed.transport_payload.is_empty() {
                     Some(
                         parsed.transport_payload.iter()
-                            .take(128)
                             .map(|b| format!("{b:02x}"))
                             .collect::<Vec<_>>()
                             .join(" ")

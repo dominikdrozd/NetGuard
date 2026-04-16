@@ -11,7 +11,7 @@ pub struct ParsedPacket {
     pub dst_port: u16,
     pub payload_len: usize,
     pub tcp_flags: Option<u8>,
-    /// Transport-layer payload bytes (after TCP/UDP header), truncated to 256 bytes
+    /// Transport-layer payload bytes (after TCP/UDP header)
     pub transport_payload: Vec<u8>,
     /// Total packet size
     pub packet_size: usize,
@@ -90,10 +90,10 @@ pub fn parse_ip_packet(data: &[u8]) -> Result<ParsedPacket, NetGuardError> {
         n => (Protocol::Other(n), 0, 0, None, 0),
     };
 
-    // Extract transport payload (after TCP/UDP header), truncated to 256 bytes
+    // Extract full transport payload (after TCP/UDP header)
     let transport_payload = if payload_data.len() > transport_header_len {
         let app_data = &payload_data[transport_header_len..];
-        app_data[..app_data.len().min(256)].to_vec()
+        app_data.to_vec()
     } else {
         Vec::new()
     };
