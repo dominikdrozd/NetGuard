@@ -42,7 +42,7 @@ contents:
       mode: 0644
 
   - src: ../systemd/netguard.service
-    dst: /lib/systemd/system/netguard.service
+    dst: /usr/lib/systemd/system/netguard.service
     file_info:
       mode: 0644
 

@@ -260,11 +260,19 @@ jobs:
           retention-days: 30
 
   # ------------------------------------------------------------------
-  # Smoke tests — install the just-built packages on a matching distro
-  # container + assert the service starts + uninstall cleanly.
+  # Smoke tests — install each package in a distro-native container and
+  # verify packaging metadata. We do NOT try to run systemd as PID 1:
+  # GitHub Actions injects its own entrypoint, so real `systemctl start`
+  # can't work. Instead we:
+  #   1. install the package (postinstall skips service enable if systemd
+  #      isn't active — see packaging/scripts/postinstall.sh),
+  #   2. verify expected files/users/dirs landed,
+  #   3. run `systemd-analyze verify` on the unit file to catch syntax bugs,
+  #   4. uninstall and verify clean removal.
+  # The NFQUEUE kernel path isn't exercisable in CI anyway, so "does it
+  # actually boot" coverage wouldn't be possible even with systemd PID 1.
   # x86_64 only; aarch64 install-script parity is enforced by the shared
-  # postinstall.sh, so re-running on an ARM container adds ~15 CI-minutes
-  # for negligible new information.
+  # postinstall.sh, so re-running on ARM adds ~15 CI-minutes for nothing.
   # ------------------------------------------------------------------
   smoke-deb:
     name: Smoke (deb / debian:12)
@@ -273,7 +281,6 @@ jobs:
     timeout-minutes: 10
     container:
       image: debian:12
-      options: --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW --cgroupns=host --tmpfs /tmp --tmpfs /run --tmpfs /run/lock
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -283,40 +290,29 @@ jobs:
       - name: Install base tools
         run: |
           apt-get update
-          apt-get install -y systemd systemd-sysv ca-certificates curl procps
-
-      - name: Bootstrap systemd
-        run: |
-          # Start systemd in the background; wait for it to come up.
-          exec /lib/systemd/systemd --system --unit=multi-user.target &
-          for i in $(seq 1 10); do
-            systemctl is-system-running 2>/dev/null && break || sleep 1
-          done
-          systemctl --version
+          apt-get install -y systemd ca-certificates curl procps
 
       - name: Install package
-        run: |
-          apt-get install -y ./dist/netguard_*_amd64.deb
-          systemctl status netguard --no-pager || true
+        run: apt-get install -y ./dist/netguard_*_amd64.deb
 
-      - name: Assert service active
+      - name: Verify file layout + unit syntax
         run: |
-          for i in $(seq 1 15); do
-            if systemctl is-active --quiet netguard; then
-              echo "netguard active after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "netguard did not become active within 15s" >&2
-          journalctl -u netguard --no-pager | tail -n 50 >&2
-          exit 1
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
 
       - name: Uninstall
         run: |
           apt-get remove -y netguard
-          test ! -f /lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
-          systemctl is-active --quiet netguard && { echo "service still active"; exit 1; } || true
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          test ! -x /usr/local/bin/netguard                  || { echo "binary leaked"; exit 1; }
           echo "clean removal"
 
   smoke-rpm:
@@ -326,45 +322,39 @@ jobs:
     timeout-minutes: 10
     container:
       image: fedora:40
-      options: --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW --cgroupns=host --tmpfs /tmp --tmpfs /run --tmpfs /run/lock
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: netguard-x86_64
           path: dist
 
-      - name: Install base tools
+      - name: Install base tools + mitmproxy
         run: |
           dnf install -y systemd ca-certificates curl procps-ng
-
-      - name: Bootstrap systemd
-        run: |
-          exec /lib/systemd/systemd --system --unit=multi-user.target &
-          for i in $(seq 1 10); do
-            systemctl is-system-running 2>/dev/null && break || sleep 1
-          done
+          # mitmproxy is a hard dep of the rpm; install it separately so dnf's
+          # dep resolver of `./netguard-*.rpm` doesn't have to find it.
+          dnf install -y mitmproxy
 
       - name: Install package
-        run: |
-          dnf install -y ./dist/netguard-*.x86_64.rpm
-          systemctl status netguard --no-pager || true
+        run: dnf install -y ./dist/netguard-*.x86_64.rpm
 
-      - name: Assert service active
+      - name: Verify file layout + unit syntax
         run: |
-          for i in $(seq 1 15); do
-            if systemctl is-active --quiet netguard; then
-              echo "netguard active after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          journalctl -u netguard --no-pager | tail -n 50 >&2
-          exit 1
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
 
       - name: Uninstall
         run: |
           dnf remove -y netguard
-          test ! -f /lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
           echo "clean removal"
 
   smoke-arch:
@@ -374,7 +364,6 @@ jobs:
     timeout-minutes: 10
     container:
       image: archlinux:base
-      options: --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW --cgroupns=host --tmpfs /tmp --tmpfs /run --tmpfs /run/lock
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -384,36 +373,28 @@ jobs:
       - name: Install base tools
         run: |
           pacman -Sy --noconfirm
-          pacman -S --noconfirm systemd ca-certificates curl procps-ng
-
-      - name: Bootstrap systemd
-        run: |
-          exec /usr/lib/systemd/systemd --system --unit=multi-user.target &
-          for i in $(seq 1 10); do
-            systemctl is-system-running 2>/dev/null && break || sleep 1
-          done
+          pacman -S --noconfirm systemd ca-certificates curl procps-ng mitmproxy
 
       - name: Install package
-        run: |
-          pacman -U --noconfirm ./dist/netguard-*.pkg.tar.zst
-          systemctl status netguard --no-pager || true
+        run: pacman -U --noconfirm ./dist/netguard-*.pkg.tar.zst
 
-      - name: Assert service active
+      - name: Verify file layout + unit syntax
         run: |
-          for i in $(seq 1 15); do
-            if systemctl is-active --quiet netguard; then
-              echo "netguard active after ${i}s"
-              exit 0
-            fi
-            sleep 1
-          done
-          journalctl -u netguard --no-pager | tail -n 50 >&2
-          exit 1
+          set -e
+          test -x /usr/local/bin/netguard                  || { echo "missing binary";   exit 1; }
+          test -f /usr/lib/systemd/system/netguard.service || { echo "missing unit";     exit 1; }
+          test -f /usr/share/netguard/netguard.toml        || { echo "missing cfg tmpl"; exit 1; }
+          test -f /usr/share/netguard/_action.sh           || { echo "missing shim";     exit 1; }
+          test -f /etc/netguard/netguard.toml              || { echo "cfg not seeded";   exit 1; }
+          test -f /etc/netguard/rules.json                 || { echo "rules not seeded"; exit 1; }
+          id -u netguard-mitm >/dev/null                   || { echo "missing user";     exit 1; }
+          systemd-analyze verify /usr/lib/systemd/system/netguard.service
+          echo "all layout checks passed"
 
       - name: Uninstall
         run: |
           pacman -R --noconfirm netguard
-          test ! -f /lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
+          test ! -f /usr/lib/systemd/system/netguard.service || { echo "unit file leaked"; exit 1; }
           echo "clean removal"
 
   # ------------------------------------------------------------------

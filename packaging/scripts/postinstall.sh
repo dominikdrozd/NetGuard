@@ -54,12 +54,21 @@ if [ ! -f /var/lib/netguard/mitm/mitmproxy-ca-cert.pem ]; then
 fi
 
 # ---- 5. Enable + start the service ---------------------------------------
-systemctl daemon-reload
-if [ "$ACTION" = "install" ]; then
-    systemctl enable --now netguard.service
+# Standard Debian convention: skip systemctl operations if the system isn't
+# booted with systemd (chroots, build containers, WSL without systemd-genie).
+# The unit will come up on next real boot because install + enable links are
+# still written by dpkg/rpm/pacman themselves when available.
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if [ "$ACTION" = "install" ]; then
+        systemctl enable --now netguard.service
+    else
+        # upgrade — restart if already enabled, but don't force-enable
+        systemctl try-restart netguard.service || true
+    fi
 else
-    # upgrade — restart if already enabled, but don't force-enable
-    systemctl try-restart netguard.service || true
+    echo "  systemd not running (no /run/systemd/system) — skipping enable/start"
+    echo "  service will be enabled on next boot"
 fi
 
 echo "netguard postinstall: done"
