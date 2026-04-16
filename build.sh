@@ -99,7 +99,22 @@ if ! command -v iptables &> /dev/null; then
 fi
 
 echo ""
-echo "[2/5] Building in release mode..."
+echo "[2/6] Building frontend (React + TypeScript)..."
+if ! command -v node &> /dev/null; then
+    echo "  ERROR: Node.js not found."
+    echo "  Install with: curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt install -y nodejs"
+    exit 1
+fi
+echo "  Node: $(node --version)"
+echo "  npm: $(npm --version)"
+cd frontend
+npm ci --silent 2>&1 || npm install --silent 2>&1
+npm run build 2>&1
+cd ..
+echo "  Frontend built to crates/netguard-web/static/"
+
+echo ""
+echo "[3/6] Building Rust daemon in release mode..."
 cargo build --release 2>&1
 
 BINARY="target/release/netguard"
@@ -109,16 +124,16 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 echo ""
-echo "[3/5] Build successful!"
+echo "[4/6] Build successful!"
 echo "  Binary: $BINARY"
 echo "  Size: $(du -h $BINARY | cut -f1)"
 echo ""
 
-echo "[4/5] Running tests..."
+echo "[5/6] Running tests..."
 cargo test -p netguard-core 2>&1 || echo "  WARNING: Some tests failed."
 
 echo ""
-echo "[5/5] Build complete!"
+echo "[6/6] Build complete!"
 echo ""
 echo "======================================"
 echo "  Next steps:"

@@ -2,3 +2,9 @@
 *.swp
 *.swo
 .env
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+crates/netguard-web/static/assets/
+crates/netguard-web/static/index.html
