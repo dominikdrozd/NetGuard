@@ -27,8 +27,11 @@ depends:
   - libnetfilter-queue1
   - libnfnetlink0
   - libmnl0
-  - mitmproxy
   - ca-certificates
+recommends:
+  # mitmproxy is only needed for opt-in HTTPS decryption. Not a hard dep so
+  # Fedora (which doesn't ship mitmproxy in base repos) can still install.
+  - mitmproxy
 
 contents:
   - src: ../target/${CARGO_TARGET}/release/netguard
@@ -81,9 +84,12 @@ overrides:
       - libnetfilter_queue
       - libnfnetlink
       - libmnl
-      - mitmproxy
       - ca-certificates
+    recommends:
+      - mitmproxy
   archlinux:
+    # Arch's `extra` repo ships mitmproxy, and pacman has no soft-dep concept,
+    # so keep it as a hard dep here — users get it automatically.
     depends:
       - iptables
       - libnetfilter_queue

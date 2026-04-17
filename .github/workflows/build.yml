@@ -328,12 +328,12 @@ jobs:
           name: netguard-x86_64
           path: dist
 
-      - name: Install base tools + mitmproxy
+      - name: Install base tools
         run: |
           dnf install -y systemd ca-certificates curl procps-ng
-          # mitmproxy is a hard dep of the rpm; install it separately so dnf's
-          # dep resolver of `./netguard-*.rpm` doesn't have to find it.
-          dnf install -y mitmproxy
+          # mitmproxy is NOT in Fedora base repos. It's listed as a Recommends
+          # (not Requires) so dnf install of the .rpm won't fail on missing
+          # mitmproxy — users who want HTTPS decryption pip-install it.
 
       - name: Install package
         run: dnf install -y ./dist/netguard-*.x86_64.rpm

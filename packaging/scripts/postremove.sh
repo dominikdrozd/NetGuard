@@ -13,7 +13,13 @@
 
 set -e
 
-. /usr/share/netguard/_action.sh "$@"
+# dpkg (and rpm) remove the package's files BEFORE running postrm, so
+# /usr/share/netguard/_action.sh may already be gone. Guard the source.
+if [ -f /usr/share/netguard/_action.sh ]; then
+    . /usr/share/netguard/_action.sh "$@"
+else
+    ACTION="${1:-remove}"
+fi
 
 echo "netguard postremove: action=$ACTION"
 
